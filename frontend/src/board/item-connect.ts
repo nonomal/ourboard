@@ -1,13 +1,28 @@
+import _, { isEqual } from "lodash"
 import * as L from "lonna"
-import { Board, Connection, Item, Point, isContainedBy, Id, isItem } from "../../../common/src/domain"
-import { BoardCoordinateHelper } from "./board-coordinates"
-import { Dispatch } from "../store/board-store"
-import * as uuid from "uuid"
-import { containedBy, findNearestAttachmentLocationForConnectionNode } from "./geometry"
-import _ from "lodash"
-import { ToolController } from "./tool-selection"
-import { BoardFocus } from "./board-focus"
 import { globalScope } from "lonna"
+import * as uuid from "uuid"
+import { rerouteByNewControlPoints, rerouteConnection, resolveEndpoint } from "../../../common/src/connection-utils"
+import {
+    Board,
+    Connection,
+    ConnectionEndPoint,
+    getEndPointItemId,
+    Id,
+    isContainedBy,
+    isItem,
+    isItemEndPoint,
+    isPoint,
+    Item,
+    Point,
+} from "../../../common/src/domain"
+import { Dispatch } from "../store/board-store"
+import { BoardCoordinateHelper } from "./board-coordinates"
+import { BoardFocus, noFocus } from "./board-focus"
+import { Coordinates, centerPoint, containedBy } from "../../../common/src/geometry"
+import { ToolController } from "./tool-selection"
+import { emptySet } from "../../../common/src/sets"
+import { IS_TOUCHSCREEN, onSingleTouch } from "./touchScreen"
 
 export const DND_GHOST_HIDING_IMAGE = new Image()
 // https://png-pixel.com/
@@ -19,23 +34,26 @@ let currentConnectionHandler = L.atom<ConnectionHandler | null>(null)
 export function startConnecting(
     board: L.Property<Board>,
     coordinateHelper: BoardCoordinateHelper,
+    latestConnection: L.Property<Connection | null>,
     dispatch: Dispatch,
     toolController: ToolController,
     focus: L.Atom<BoardFocus>,
-    item: Item,
+    from: Item | Point,
 ) {
     const h = currentConnectionHandler.get()
     if (h) {
         endConnection()
     } else {
-        const h = drawConnectionHandler(board, coordinateHelper, focus, dispatch)
+        const h = newConnectionCreator(board, focus, latestConnection, dispatch)
         currentConnectionHandler.set(h)
         focus.set({ status: "connection-adding" })
-        h.whileDragging(item, coordinateHelper.currentBoardCoordinates.get())
         const toWatch = [currentConnectionHandler, toolController.tool, focus] as L.Property<any>[]
         const stop = L.merge(toWatch.map((p) => p.pipe(L.changes))).pipe(L.take(1, globalScope))
+        const action = toolController.tool.get() === "line" ? "line" : "connect"
+
+        h.whileDragging(from, coordinateHelper.currentBoardCoordinates.get(), action)
         coordinateHelper.currentBoardCoordinates.pipe(L.takeUntil(stop)).forEach((pos) => {
-            h.whileDragging(item, pos)
+            h.whileDragging(from, pos, action)
         })
         stop.forEach(endConnection)
     }
@@ -50,69 +68,90 @@ export function startConnecting(
     }
 }
 
-type ConnectionHandler = ReturnType<typeof drawConnectionHandler>
+type ConnectionHandler = ReturnType<typeof newConnectionCreator>
 
-export function drawConnectionHandler(
+export function newConnectionCreator(
     board: L.Property<Board>,
-    coordinateHelper: BoardCoordinateHelper,
     focus: L.Atom<BoardFocus>,
+    latestConnection: L.Property<Connection | null>,
     dispatch: Dispatch,
 ) {
     let localConnection: Connection | null = null
 
-    function whileDragging(item: Item, currentBoardCoords: Point) {
+    function whileDragging(from: Item | Point, currentBoardCoords: Point, action: "connect" | "line") {
         const b = board.get()
         const boardId = b.id
+        const startPoint: ConnectionEndPoint = isItem(from) ? from.id : from
+        const target = findTarget(b, startPoint, currentBoardCoords, localConnection, getFindTargetOptions(action))
 
-        const targetExistingItem = findTarget(b.items, item, currentBoardCoords)
-
-        if (targetExistingItem === item) {
+        if (target === null) {
             if (localConnection !== null) {
                 // Remove current connection, because connect-to-self is not allowed at least for now
-                dispatch({ action: "connection.delete", boardId, connectionId: localConnection.id })
+                if (!IS_TOUCHSCREEN)
+                    dispatch({ action: "connection.delete", boardId, connectionIds: [localConnection.id] })
                 localConnection = null
             }
         } else {
             if (localConnection === null) {
                 // Start new connection
-                localConnection = newConnection(item)
-                dispatch({ action: "connection.add", boardId, connection: localConnection })
+                localConnection = newConnection(startPoint, target, action)
+                if (!IS_TOUCHSCREEN) dispatch({ action: "connection.add", boardId, connections: [localConnection] })
             } else {
                 // Change current connection endpoint
-                const destinationPoint = targetExistingItem ?? currentBoardCoords
-
-                const midpointFromReference = findNearestAttachmentLocationForConnectionNode(item, destinationPoint)
-                const midpointToReference = findNearestAttachmentLocationForConnectionNode(destinationPoint, item)
-                const midpoint = {
-                    x: (midpointFromReference.point.x + midpointToReference.point.x) * 0.5,
-                    y: (midpointFromReference.point.y + midpointToReference.point.y) * 0.5,
-                }
-
                 // console.log({ item, midpoint, to: targetExistingItem ?? currentPos })
 
-                localConnection = {
-                    ...localConnection,
-                    controlPoints: [midpoint],
-                    to: targetExistingItem ? targetExistingItem.id : currentBoardCoords,
-                }
+                localConnection = rerouteConnection(
+                    {
+                        ...localConnection,
+                        to: target,
+                    },
+                    b,
+                )
 
-                dispatch({ action: "connection.modify", boardId: b.id, connection: localConnection })
+                if (!IS_TOUCHSCREEN)
+                    dispatch({ action: "connection.modify", boardId: b.id, connections: [localConnection] })
             }
         }
-    }
 
-    function newConnection(from: Item): Connection {
-        return {
-            id: uuid.v4(),
-            from: from.id,
-            controlPoints: [],
-            to: coordinateHelper.currentBoardCoordinates.get(),
+        function newConnection(from: ConnectionEndPoint, target: Id | Point, action: "connect" | "line"): Connection {
+            const l = latestConnection.get()
+
+            return rerouteConnection(
+                {
+                    id: uuid.v4(),
+                    from: from,
+                    controlPoints: l && l.controlPoints.length === 0 ? [] : [{ x: 0, y: 0 }],
+                    to: target,
+                    action,
+                    locked: false,
+                    ...(action === "connect"
+                        ? {
+                              fromStyle: (l && l.fromStyle) ?? "none",
+                              toStyle: (l && l.toStyle) ?? "arrow",
+                              pointStyle: (l && l.pointStyle) ?? "black-dot",
+                          }
+                        : {
+                              fromStyle: "none",
+                              toStyle: "none",
+                              pointStyle: "none",
+                          }),
+                },
+                b,
+            )
         }
     }
 
     const endDrag = () => {
-        focus.set(localConnection ? { status: "connection-selected", id: localConnection.id } : { status: "none" })
-        localConnection = null
+        if (localConnection) {
+            const addedConnection = localConnection
+            localConnection = null
+            if (IS_TOUCHSCREEN) {
+                dispatch({ action: "connection.add", boardId: board.get().id, connections: [addedConnection] })
+            }
+            focus.set({ status: "selected", itemIds: emptySet(), connectionIds: new Set(addedConnection.id) })
+        } else {
+            focus.set(noFocus)
+        }
     }
 
     return {
@@ -122,8 +161,12 @@ export function drawConnectionHandler(
     }
 }
 
+function shouldPreventAttach(e: DragEvent) {
+    return e.shiftKey || e.altKey || e.ctrlKey || e.metaKey
+}
+
 export function existingConnectionHandler(
-    endNode: Element,
+    endNode: HTMLElement,
     connectionId: string,
     type: "from" | "to" | "control",
     coordinateHelper: BoardCoordinateHelper,
@@ -131,37 +174,125 @@ export function existingConnectionHandler(
     dispatch: Dispatch,
 ) {
     endNode.addEventListener("drag", (e) => e.stopPropagation())
-    endNode.addEventListener(
-        "drag",
-        _.throttle(() => {
-            const b = board.get()
-            const connection = b.connections.find((c) => c.id === connectionId)!
-            const items = b.items
-            const coords = coordinateHelper.currentBoardCoordinates.get()
-            if (type === "to") {
-                const hitsItem = findTarget(items, connection.from, coords)
-                const to = hitsItem && hitsItem.id !== connection.from ? hitsItem.id : coords
-                dispatch({ action: "connection.modify", boardId: b.id, connection: { ...connection, to } })
-            } else if (type === "from") {
-                const hitsItem = findTarget(items, connection.to, coords)
-                const from = hitsItem && hitsItem.id !== connection.to ? hitsItem.id : coords
-                dispatch({ action: "connection.modify", boardId: b.id, connection: { ...connection, from } })
-            } else {
+    endNode.addEventListener("drag", (e) => modifyConnection(shouldPreventAttach(e)))
+
+    endNode.addEventListener("touchmove", (e: TouchEvent) => {
+        onSingleTouch(e, (touch) => {
+            e.preventDefault()
+            e.stopPropagation()
+            coordinateHelper.currentPageCoordinates.set({ x: touch.pageX, y: touch.pageY })
+            modifyConnection(false)
+        })
+    })
+
+    let prevCoords: Coordinates = coordinateHelper.currentBoardCoordinates.get()
+
+    function modifyConnection(preventAttach: boolean) {
+        const coords = coordinateHelper.currentBoardCoordinates.get()
+        if (isEqual(coords, prevCoords)) {
+            return
+        }
+        prevCoords = coords
+        const b = board.get()
+        const connection = b.connections.find((c) => c.id === connectionId)!
+        const options = getFindTargetOptions(connection.action, preventAttach)
+        if (type === "to") {
+            const target = findTarget(b, connection.from, coords, connection, options)
+            if (target !== null) {
+                const to = target
                 dispatch({
                     action: "connection.modify",
                     boardId: b.id,
-                    connection: { ...connection, controlPoints: [coords] },
+                    connections: [rerouteConnection({ ...connection, to }, b)],
                 })
             }
-        }, 20),
-    )
+        } else if (type === "from") {
+            const target = findTarget(b, connection.to, coords, connection, options)
+            if (target != null) {
+                const from = target
+                dispatch({
+                    action: "connection.modify",
+                    boardId: b.id,
+                    connections: [rerouteConnection({ ...connection, from }, b)],
+                })
+            }
+        } else {
+            dispatch({
+                action: "connection.modify",
+                boardId: b.id,
+                connections: [rerouteByNewControlPoints(connection, [coords], b)],
+            })
+        }
+    }
 }
 
-function findTarget(items: Record<Id, Item>, from: Item | Id | Point, currentPos: Point) {
-    const fromItem = typeof from === "string" ? items[from] : isItem(from) ? from : null
+function getFindTargetOptions(action: "line" | "connect", preventAttach = false): FindTargetOptions {
+    return {
+        allowConnect: action === "connect" && !preventAttach,
+        allowSnap: !preventAttach,
+    }
+}
 
-    return Object.values(items)
-        .filter((i) => containedBy({ ...currentPos, width: 0, height: 0 }, i)) // match coordinates
-        .sort((a, b) => (isContainedBy(items, a)(b) ? 1 : -1)) // most innermost first (containers last)
-        .find((i) => !fromItem || !isContainedBy(items, i)(fromItem)) // does not contain the "from" item
+type FindTargetOptions = { allowConnect: boolean; allowSnap: boolean }
+function findTarget(
+    b: Board,
+    from: Item | ConnectionEndPoint,
+    currentPos: Point,
+    currentConnection: Connection | null,
+    options: FindTargetOptions,
+): Id | Point | null {
+    const items = b.items
+    const resolvedFromPoint = resolveEndpoint(from, items)
+    const fromItem = isItem(resolvedFromPoint) ? resolvedFromPoint : null
+
+    if (fromItem && containedBy(currentPos, fromItem)) {
+        // Target point inside fromItem => not acceptable
+        return null
+    }
+
+    const targetItem =
+        options.allowConnect &&
+        Object.values(items)
+            .filter((i) => !i.hidden)
+            .filter((i) => containedBy({ ...currentPos, width: 0, height: 0 }, i)) // match coordinates
+            .filter((i) => isConnectionAttachmentPoint(currentPos, i))
+            .filter((i) =>
+                isItem(resolvedFromPoint)
+                    ? !isConnected(b, i, resolvedFromPoint, currentConnection)
+                    : !containedBy(resolvedFromPoint, i),
+            )
+            .sort((a, b) => (isContainedBy(items, a)(b) ? 1 : -1)) // most innermost first (containers last)
+            .find((i) => !fromItem || !isContainedBy(items, i)(fromItem)) // does not contain the "from" item
+
+    if (targetItem) return targetItem
+    if (!isPoint(from)) return currentPos
+    const xDiff = Math.abs(currentPos.x - from.x)
+    const yDiff = Math.abs(currentPos.y - from.y)
+    if (xDiff === 0 || yDiff === 0) return currentPos
+    const threshold = 0.02
+    if (xDiff / yDiff < threshold) return { x: from.x, y: currentPos.y }
+    if (yDiff / xDiff < threshold) return { x: currentPos.x, y: from.y }
+    return currentPos
+}
+
+function isConnected(b: Board, x: Item, y: Item, connectionToIgnore: Connection | null) {
+    return b.connections.some((c) => connectionToIgnore != c && isConnectionRelated(x, c) && isConnectionRelated(y, c))
+}
+
+function isConnectionRelated(i: Item, c: Connection) {
+    return isEndPointRelated(i, c.from) || isEndPointRelated(i, c.to)
+}
+
+function isEndPointRelated(i: Item, c: ConnectionEndPoint) {
+    return isItemEndPoint(c) && getEndPointItemId(c) === i.id
+}
+
+export function isConnectionAttachmentPoint(point: Point, item: Item) {
+    if (item.type !== "container") return true
+    const center = centerPoint(item)
+    const factor = 0.9
+    return (
+        Math.abs(point.x - center.x) > (item.width / 2) * factor ||
+        Math.abs(point.y - center.y) > (item.height / 2) * factor
+    )
 }

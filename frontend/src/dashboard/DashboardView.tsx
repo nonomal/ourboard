@@ -3,10 +3,21 @@ import { getNavigator, Link } from "harmaja-router"
 import * as L from "lonna"
 import * as R from "ramda"
 import * as uuid from "uuid"
-import { BoardAccessPolicy, EventFromServer, exampleBoard, RecentBoard } from "../../../common/src/domain"
+import {
+    BoardAccessPolicy,
+    BoardStub,
+    CrdtDisabled,
+    CrdtEnabled,
+    EventFromServer,
+    exampleBoard,
+    RecentBoard,
+    ServerConfig,
+} from "../../../common/src/domain"
 import { BOARD_PATH, createBoardAndNavigate, Routes } from "../board-navigation"
 import { localStorageAtom } from "../board/local-storage-atom"
+import { IS_TOUCHSCREEN } from "../board/touchScreen"
 import { BoardAccessPolicyEditor } from "../components/BoardAccessPolicyEditor"
+import { BoardCrdtModeSelector } from "../components/BoardCrdtModeSelector"
 import { TextInput } from "../components/components"
 import { signIn, signOut } from "../google-auth"
 import { Dispatch } from "../store/board-store"
@@ -18,11 +29,13 @@ export const DashboardView = ({
     dispatch,
     recentBoards,
     eventsFromServer,
+    serverConfig,
 }: {
     sessionState: L.Property<UserSessionState>
     recentBoards: RecentBoards
     dispatch: Dispatch
     eventsFromServer: L.EventStream<EventFromServer>
+    serverConfig: L.Property<ServerConfig | null>
 }) => {
     const boardName = L.atom("")
     return (
@@ -33,7 +46,8 @@ export const DashboardView = ({
                         OurBoard
                     </h1>
                     <p>
-                        Free and <a href="https://github.com/raimohanska/r-board">open-source</a> online whiteboard.
+                        Free and <a href="https://github.com/raimohanska/r-board">open-source</a>{" "}
+                        online&nbsp;whiteboard.
                     </p>
                 </header>
                 <div className="user-info">
@@ -42,7 +56,8 @@ export const DashboardView = ({
                             case "logged-in":
                                 return (
                                     <>
-                                        <span>{user.name}</span> <a onClick={signOut}>Sign out</a>
+                                        <span title={user.email}>{user.name}</span>
+                                        <a onClick={signOut}>Sign out</a>
                                     </>
                                 )
                             default:
@@ -55,42 +70,38 @@ export const DashboardView = ({
                     })}
                 </div>
                 <main>
-                    <CreateBoard {...{ dispatch, sessionState, boardName, recentBoards, eventsFromServer }} />
+                    <CreateBoard
+                        {...{ dispatch, sessionState, boardName, recentBoards, eventsFromServer, serverConfig }}
+                    />
                     <div>
                         <div className="user-content">
-                            <RecentBoardsView
-                                {...{ recentBoards, dispatch, sessionState, boardName, eventsFromServer }}
-                            />
+                            <RecentBoardsView {...{ recentBoards, boardName }} />
                         </div>
                     </div>
                     <Welcome {...{ recentBoards, dispatch, eventsFromServer, sessionState }} />
                 </main>
             </div>
+            <div className="sponsor">
+                Sponsored by{" "}
+                <a href="https://www.reaktor.com">
+                    <img className="logo" src="/img/reaktor-logo.jpg" />
+                </a>
+            </div>
         </div>
     )
 }
 
-const RecentBoardsView = ({
-    recentBoards,
-    dispatch,
-    sessionState,
-    boardName,
-}: {
-    recentBoards: RecentBoards
-    sessionState: L.Property<UserSessionState>
-    dispatch: Dispatch
-    boardName: L.Atom<string>
-}) => {
-    const navigator = getNavigator<Routes>()
+const RecentBoardsView = ({ recentBoards, boardName }: { recentBoards: RecentBoards; boardName: L.Atom<string> }) => {
     const defaultLimit = 25
     const filter = boardName
-
+    const filtered = L.view(filter, (f) => !!f)
+    const edit = L.atom(false)
     const limit = localStorageAtom("recentBoards.limit", defaultLimit)
 
     const sort = localStorageAtom<"recent-first" | "alphabetical">("recentBoards.sort", "recent-first")
 
     const matchingBoards = L.view(recentBoards.recentboards, filter, (bs, f) =>
-        bs.filter((b) => b.name.toLowerCase().includes(f)),
+        bs.filter((b) => b.name.toLowerCase().includes(f.toLowerCase())),
     )
     const boardsToShow = L.view(matchingBoards, limit, sort, filter, (bs, l, s, f) =>
         R.pipe(
@@ -100,19 +111,7 @@ const RecentBoardsView = ({
         )(bs),
     )
     const moreBoards = L.view(limit, matchingBoards, (l, bs) => bs.length - l)
-    const inputRef = (e: HTMLInputElement) => {
-        setTimeout(() => e.focus(), 0)
-    }
-    const onKeyDown = (e: JSX.KeyboardEvent) => {
-        if (e.keyCode === 13) {
-            const board = boardsToShow.get()[0]
-            if (board) {
-                navigator.navigateByParams(BOARD_PATH, { boardId: board.id })
-            }
-        }
-    }
     const aLot = 7
-    const lotsOfBoards = L.view(recentBoards.recentboards, (bs) => bs.length >= aLot)
     const lotsOfShownBoards = L.view(matchingBoards, (bs) => bs.length >= aLot)
     return (
         <div>
@@ -121,10 +120,21 @@ const RecentBoardsView = ({
                 (recent) => recent.length === 0,
                 (empty) =>
                     empty ? null : (
-                        <div className="recent-boards">
+                        <div
+                            className={L.view(
+                                edit,
+                                filtered,
+                                (e, f) => `recent-boards${e ? " edit" : ""}${f ? " filtered" : ""}`,
+                            )}
+                        >
                             <h2>
                                 {L.view(filter, (f) =>
                                     f === "" ? "Your recent boards" : "Found in your recent boards",
+                                )}
+                                {IS_TOUCHSCREEN && (
+                                    <a className="edit" onClick={() => edit.modify((e) => !e)}>
+                                        {L.view(edit, (e) => (e ? "done" : "edit"))}
+                                    </a>
                                 )}
                             </h2>
                             <ul>
@@ -259,13 +269,34 @@ const Welcome = ({
 const CreateBoardOptions = ({
     accessPolicy,
     sessionState,
+    useCollaborativeEditing,
+    serverConfig,
 }: {
     accessPolicy: L.Atom<BoardAccessPolicy | undefined>
     sessionState: L.Property<UserSessionState>
+    useCollaborativeEditing: L.Atom<boolean>
+    serverConfig: L.Property<ServerConfig | null>
 }) => {
-    return L.view(
+    const optInCollaborative = L.view(
         sessionState,
-        (s) => s.status === "logged-in" && <BoardAccessPolicyEditor {...{ accessPolicy, user: s }} />,
+        serverConfig,
+        (s, c) => c?.crdt === "opt-in" || (c?.crdt === "opt-in-authenticated" && s.status === "logged-in"),
+    )
+
+    return (
+        <>
+            {L.view(optInCollaborative, (optIn) => optIn && <BoardCrdtModeSelector {...{ useCollaborativeEditing }} />)}
+            {L.view(sessionState, (s) =>
+                s.status === "logged-in" ? (
+                    <BoardAccessPolicyEditor {...{ accessPolicy, user: s }} />
+                ) : (
+                    <small className="anonymousBoardDisclaimer">
+                        Anonymously created boards are accessible to anyone with a link. You may{" "}
+                        <a onClick={signIn}>sign in</a> first in order to restrict access to your new board.
+                    </small>
+                ),
+            )}
+        </>
     )
 }
 
@@ -275,12 +306,14 @@ const CreateBoard = ({
     boardName,
     recentBoards,
     eventsFromServer,
+    serverConfig,
 }: {
     dispatch: Dispatch
     sessionState: L.Property<UserSessionState>
     boardName: L.Atom<string>
     recentBoards: RecentBoards
     eventsFromServer: L.EventStream<EventFromServer>
+    serverConfig: L.Property<ServerConfig | null>
 }) => {
     const disabled = L.view(boardName, (n) => !n)
     const navigator = getNavigator<Routes>()
@@ -289,10 +322,19 @@ const CreateBoard = ({
         accessPolicy.set(defaultAccessPolicy(s, false))
     })
     const hasRecentBoards = L.view(recentBoards.recentboards, (bs) => bs.length > 0)
+    const useCollaborativeEditingAtom = L.atom(false)
+    const useCollaborativeEditing = L.view(serverConfig, useCollaborativeEditingAtom, (c, u) =>
+        c?.crdt === "true" ? true : c?.crdt === "false" ? false : u,
+    )
 
     function onSubmit(e: JSX.FormEvent) {
         e.preventDefault()
-        const newBoard = { name: boardName.get(), id: uuid.v4(), accessPolicy: accessPolicy.get() }
+        const newBoard: BoardStub = {
+            name: boardName.get(),
+            id: uuid.v4(),
+            accessPolicy: accessPolicy.get(),
+            crdt: useCollaborativeEditing.get() ? CrdtEnabled : CrdtDisabled,
+        }
         createBoardAndNavigate(newBoard, dispatch, navigator, eventsFromServer)
     }
 
@@ -300,12 +342,25 @@ const CreateBoard = ({
         <form onSubmit={onSubmit} className="create-board">
             <h2>{L.view(hasRecentBoards, (has) => (has ? "Find or create a board" : "Create a board"))}</h2>
             <div className="input-and-button">
-                <TextInput value={boardName} placeholder="Enter board name" />
+                <TextInput value={boardName} autoFocus={!IS_TOUCHSCREEN} placeholder="Enter board name" />
                 <button id="create-board-button" data-test="create-board-submit" type="submit" disabled={disabled}>
                     Create
                 </button>
             </div>
-            {L.view(disabled, (d) => !d && <CreateBoardOptions {...{ accessPolicy, sessionState }} />)}
+            {L.view(
+                disabled,
+                (d) =>
+                    !d && (
+                        <CreateBoardOptions
+                            {...{
+                                accessPolicy,
+                                sessionState,
+                                useCollaborativeEditing: useCollaborativeEditingAtom,
+                                serverConfig,
+                            }}
+                        />
+                    ),
+            )}
         </form>
     )
 }

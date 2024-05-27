@@ -1,13 +1,13 @@
 import { h } from "harmaja"
 import * as L from "lonna"
-import { BoardCoordinateHelper } from "./board-coordinates"
-import { Board, Image } from "../../../common/src/domain"
-import { BoardFocus } from "./board-focus"
+import { Board, Connection, Image } from "../../../common/src/domain"
 import { AssetStore } from "../store/asset-store"
+import { Dispatch } from "../store/board-store"
+import { BoardCoordinateHelper } from "./board-coordinates"
+import { BoardFocus } from "./board-focus"
 import { itemDragToMove } from "./item-dragmove"
 import { itemSelectionHandler } from "./item-selection"
-import { Dispatch } from "../store/board-store"
-import { Tool, ToolController } from "./tool-selection"
+import { ToolController } from "./tool-selection"
 import { itemZIndex } from "./zIndices"
 
 export const ImageView = ({
@@ -19,6 +19,7 @@ export const ImageView = ({
     focus,
     toolController,
     coordinateHelper,
+    latestConnection,
     dispatch,
 }: {
     board: L.Property<Board>
@@ -28,16 +29,18 @@ export const ImageView = ({
     focus: L.Atom<BoardFocus>
     toolController: ToolController
     coordinateHelper: BoardCoordinateHelper
+    latestConnection: L.Property<Connection | null>
     dispatch: Dispatch
     assets: AssetStore
 }) => {
-    const { selected, onClick } = itemSelectionHandler(
+    const { selected, onClick, onTouchStart } = itemSelectionHandler(
         id,
         "image",
         focus,
         toolController,
         board,
         coordinateHelper,
+        latestConnection,
         dispatch,
     )
     const tool = toolController.tool
@@ -45,7 +48,19 @@ export const ImageView = ({
         <span
             className="image"
             onClick={onClick}
-            ref={itemDragToMove(id, board, focus, toolController, coordinateHelper, dispatch, false) as any}
+            onTouchStart={onTouchStart}
+            ref={
+                itemDragToMove(
+                    id,
+                    board,
+                    focus,
+                    toolController,
+                    coordinateHelper,
+                    latestConnection,
+                    dispatch,
+                    false,
+                ) as any
+            }
             style={L.view(
                 image,
                 (p: Image) =>

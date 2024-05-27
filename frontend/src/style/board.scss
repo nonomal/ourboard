@@ -1,13 +1,12 @@
 #root.board-container {
     width: 100%;
     height: calc(100vh - 2em);
-    font-size: max(min(4vw, 3vh, 20px), 100%);
     display: flex;
     flex-direction: column;
-    &:not(.ready) {
+    &:not(.online, .offline) {
         header .controls,
         > .content-container > .scroll-container > .border-container > .board,
-        header .board-name,
+        header #board-info,
         .tool-layer {
             .board-tool,
             > .history {
@@ -22,7 +21,7 @@
     &.embedded {
         font-size: 100%;
         header,
-        .navigation,
+        .navigation-toolbar,
         .history,
         .zoom-toolbar,
         .undo-redo-toolbar,
@@ -49,74 +48,14 @@
         user-select: text;
     }
 
-    header {
-        border-bottom: 2px solid #e7e8e8;
-        font-size: 0.8em;
-        z-index: $z-index-menu;
-        padding: 0.8em;
-        width: 100%;
-        display: flex;
-        background: #fffffff8;
-        color: $black;
-
-        span[contenteditable] {
-            border: 2px solid transparent;
-            padding: 0.3rem 0.6rem;
-            &[contenteditable="false"]:hover,
-            &:focus {
-                border: 2px solid #2f80edd9;
-            }
-            &:focus {
-                outline: none;
-            }
-        }
-
-        > * {
-            width: 33.3%;
-        }
-
-        > #board-name {
-            text-align: center;
-            margin-left: 0.5em;
-            margin-left: 1rem;
-            small {
-                color: gray;
-                border-radius: 0.5em;
-                padding: 1px 0.5em;
-                font-size: 0.6em;
-                vertical-align: middle;
-            }
-        }
-
-        .user-info {
-            display: flex;
-            justify-content: flex-end;
-            .icon {
-                margin-right: 0.5em;
-                img {
-                    max-height: 1em;
-                    border-radius: 50%;
-                }
-            }
-            a.login,
-            a.logout {
-                margin-left: 0.8em;
-                font-size: 0.6em;
-            }
-            &.logging-in-local,
-            &.logging-in-server {
-                @extend .disabled-interaction;
-            }
-        }
-        > * {
-            color: $black;
-        }
-    }
-
     > .content-container {
         flex-grow: 1;
-        height: 99%;
+        height: 80%;
         position: relative;
+        margin-top: $header-height;
+        @media (max-width: $narrow-screen-breakpoint) {
+            margin-top: $header-height + $fixed-toolbar-height;
+        }
         > .scroll-container {
             height: 100%;
             overflow: auto;
@@ -163,8 +102,12 @@
                 display: block;
                 width: 10px;
                 height: 10px;
+                .touch & {
+                    width: max(0.8rem, min(1.5rem, 1em));
+                    height: max(0.8rem, min(1.5rem, 1em));
+                }
                 background: white;
-                border-radius: 2px;
+                border-radius: 20%;
                 border: 1px solid #cccccc;
                 $corner-offset: -7px;
 
@@ -212,12 +155,59 @@
                     transform: rotate(45deg) scale(0.707);
                 }
             }
+
+            &.color-ffffff00,
+            &.color-none {
+                > .shape {
+                    box-shadow: none;
+                    border: 1px dashed #00000040;
+                }
+            }
+
+            > .quill-wrapper {
+                width: 100%;
+                display: flex;
+                padding: 0;
+
+                * {
+                    user-select: initial;
+                }
+
+                > .quill-editor {
+                    width: 100%;
+                    height: fit-content;
+                    overflow: visible;
+                    > .ql-editor {
+                        padding: 0.1em;
+                        ol,
+                        ul {
+                            padding: 0;
+                        }
+                    }
+                    .ql-cursors {
+                        .ql-cursor-name {
+                            margin: 0.1em 0.4em 0.05em;
+                            font-size: min(1rem, 0.7em);
+                        }
+                    }
+                }
+            }
+
+            &.text {
+                > .quill-wrapper {
+                    height: 100%;
+                }
+            }
         }
 
         .note {
             @extend .item;
             font-family: $font-family-note;
             text-align: center;
+
+            &.locked {
+                opacity: 0.5;
+            }
 
             small {
                 display: block;
@@ -242,6 +232,11 @@
             box-shadow: none;
             align-items: flex-start;
             justify-content: flex-start;
+
+            > .shape {
+                border: none !important;
+                box-shadow: none;
+            }
         }
 
         .item .editable {
@@ -311,6 +306,19 @@
                 margin-top: 0.5em;
                 z-index: 1;
             }
+
+            > .hidden-contents-indicator {
+                position: absolute;
+                width: 100%;
+                height: 100%;
+                display: flex;
+                opacity: 0.1;
+                justify-content: center;
+                align-items: center;
+                > svg {
+                    width: 20%;
+                }
+            }
         }
 
         .image {
@@ -318,6 +326,9 @@
             img {
                 width: 100%;
                 height: 100%;
+            }
+            &.locked {
+                opacity: 0.5;
             }
         }
 
@@ -329,19 +340,24 @@
             }
         }
 
-        .lock {
-            position: absolute;
-            bottom: 0.1em;
-            left: 0.1em;
-        }
-
         .cursor {
             z-index: $z-index-cursors;
             pointer-events: none;
             position: absolute;
             display: block;
             transition-timing-function: ease-in-out;
-            //transition: left 0.1s, top 0.1s;
+            &.stale {
+                animation: 10s 1 fadeout;
+                opacity: 0.1;
+            }
+            @keyframes fadeout {
+                0% {
+                    opacity: 1;
+                }
+                100% {
+                    opacity: 0.1;
+                }
+            }
             .arrow {
                 transform: rotate(-35deg);
                 display: block;
@@ -354,10 +370,10 @@
             .userInfo {
                 display: flex;
                 align-items: center;
-                margin-left: 0.6em;
+                margin-left: 0.6rem;
                 img {
                     border-radius: 50%;
-                    max-width: 1em;
+                    max-width: 1rem;
                 }
                 .text {
                     font-size: 0.5rem;
@@ -376,333 +392,178 @@
     }
 
     .context-menu-positioner {
-        @extend .ui-context-menu-positioner;
-
-        .context-menu {
-            @extend .ui-context-menu;
-            display: flex;
-            font-size: 1rem;
-            margin-top: -3em;
-            cursor: pointer;
-            .icon {
-                position: relative;
-                &.active {
-                    &:after {
-                        content: "";
-                        position: absolute;
-                        pointer-events: none;
-                        border-bottom: 2px solid $black;
-                        top: 0;
-                        margin-bottom: -4px;
-                        bottom: 0;
-                        left: 0;
-                        right: 0;
-                    }
-                }
-            }
-            .align {
-                &:not(:last-child) {
-                    margin-right: 1em;
-                }
-                .icon:not(:last-child) {
-                    margin-right: 0.5em;
-                }
-            }
-            .icon-group {
-                display: inline-block;
-                &:not(:last-child) {
-                    margin-right: 0.5em;
-                }
-                .icon {
-                    &:not(:last-child) {
-                        margin-right: 0.5em;
-                    }
-                }
-                .color {
-                    height: 1em;
-                    width: 1em;
-                    display: inline-block;
-                    &.white,
-                    &.transparent {
-                        border: 1px solid #eeeeee;
-                    }
-                    &.transparent {
-                        background: repeating-conic-gradient(#dddddd 0% 25%, transparent 0% 50%) 50%/0.5em 0.5em;
-                    }
-                }
-            }
-        }
-    }
-
-    > .content-container > .tool-layer {
-        margin: 0;
         z-index: $z-index-menu;
         position: absolute;
         pointer-events: none;
-        width: 100%;
-        height: 100%;
-        top: 0;
 
         > * {
-            pointer-events: all;
+            font-size: 1rem;
+            .touch & {
+                font-size: 1.7rem;
+            }
         }
 
-        &.read-only {
-            .main-toolbar,
-            .undo-redo-toolbar {
+        .context-menu {
+            pointer-events: all;
+            padding: 0.5em;
+            border: 1px solid #cccccc;
+            border-radius: 2px;
+            background: white;
+            &.hidden {
                 display: none;
             }
-        }
+            display: grid;
+            grid-column-gap: 0.5em;
+            grid-row-gap: 0.5em;
+            grid-auto-flow: column;
 
-        .toolbar {
-            border: 2px solid $off-board-color;
-            box-shadow: 0px 2px 6px 0px #00263a0f;
-            display: inline-block;
-            background: white;
-            padding: 0.5em;
-            border-radius: 6px;
-        }
-
-        .navigation-toolbar {
-            @extend .toolbar;
-            position: absolute;
-            left: 1em;
-            top: 1em;
-            font-size: 0.8em;
-            a {
-                .icon {
-                    vertical-align: top;
-                    margin-right: 0.5em;
-                }
-                text-decoration: none;
-                color: $black;
-            }
-        }
-        .main-toolbar {
-            @extend .toolbar;
-            position: fixed;
-            display: flex;
-            align-items: center;
-
-            &.vertical {
-                padding: 0.5em 0.8em 0.2em 0.5em;
-                flex-direction: column;
-                top: 50%;
-                transform: translateY(-50%);
-            }
-
-            &.horizontal {
-                padding: 0.5em 1em 0.2em;
-                flex-direction: row;
-                top: 4rem;
-                left: 50%;
-                transform: translateX(-50%);
-            }
-
-            .tool {
-                margin: 0.5em 0;
-            }
-
-            .new-item {
-                display: inline-flex;
-                flex-direction: column;
-                position: relative;
-                margin: 0.2em 0.8em;
-                .text {
-                    margin-top: 1.5rem;
-                    font-size: 0.8rem;
-                    text-align: center;
-                }
-                .icon {
-                    cursor: pointer;
-                    height: 2rem;
-                    width: 2rem;
-                    margin: 0;
-                }
-            }
-        }
-
-        .undo-redo-toolbar {
-            @extend .toolbar;
-            position: absolute;
-            font-size: 1.2em;
-            left: 1em;
-            bottom: 1em;
-            padding-bottom: 0.2em;
-        }
-
-        .zoom-toolbar {
-            position: absolute;
-            font-size: 1.5em;
-            right: 1rem;
-            bottom: 1rem;
-            padding: 0.5em;
-        }
-
-        .minimap {
-            @extend .toolbar;
-            font-size: 1vw;
-            display: inline-block;
-            position: absolute;
-            bottom: 1rem;
-            right: 1rem;
-            background: white;
-            border: 0.3em solid #eeeeee88;
-            box-sizing: content-box;
-            pointer-events: none;
-            padding-bottom: 3rem;
-            min-width: 6rem;
-            .content {
-                position: relative;
-                .viewarea {
-                    display: inline-block;
-                    position: absolute;
-                    border: 1px solid $black;
-                }
-                .item {
-                    display: inline-block;
-                    position: absolute;
-                    background: $link-color;
-                    border: 2px solid $link-color;
-                    &.container {
-                        opacity: 0.5;
-                    }
-                }
-            }
-        }
-
-        .icon {
-            &:not(:first-child) {
-                margin-left: 0.5em;
-            }
             cursor: pointer;
-            position: relative;
-        }
 
-        .board-status-message {
-            height: 100%;
-            width: 100%;
-            z-index: 100;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            pointer-events: none;
-            > div {
-                pointer-events: all;
-                max-width: 80%;
+            .icon-group {
+                grid-auto-flow: column;
             }
         }
-    }
 
-    > .content-container > .tool-layer > .history {
-        position: absolute;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        display: flex;
-        flex-direction: column;
-        padding: 1rem;
-        h2 {
-            font-size: 1.2rem;
-            margin-bottom: 1em;
+        &.item-bottom {
+            .context-menu {
+                margin-top: 0.8em;
+            }
+            .submenu {
+                top: 3.1em;
+            }
         }
-        > .history-icon-wrapper {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
+        &.item-top {
+            .context-menu {
+                margin-top: -2.5em;
+            }
+            .submenu {
+                bottom: 2.7em;
+            }
         }
-        z-index: $z-index-menu;
-        min-width: 1rem;
-        &:not(.expanded) {
+
+        .icon-group {
+            display: inline-grid;
+            grid-column-gap: 0.5em;
+            grid-row-gap: 0.5em;
+        }
+
+        .icon.color {
+            height: 1em;
+            width: 1em;
+            display: inline-block;
+            &.white,
+            &.transparent {
+                border: 1px solid #eeeeee;
+                background: repeating-conic-gradient(#dddddd 0% 25%, transparent 0% 50%) 50%/0.5em 0.5em;
+            }
+
+            &.new-color {
+                position: relative;
+                background: conic-gradient(
+                        #ff5555 0%,
+                        #ffaa55 15%,
+                        #ffff55 30%,
+                        #55ff55 45%,
+                        #5555ff 60%,
+                        #aa55ff 75%,
+                        #ff55ff 90%,
+                        #ff5555 100%
+                    )
+                    50%;
+                border-radius: 50%;
+
+                > input[type="color"] {
+                    position: absolute;
+                    width: 100%;
+                    height: 100%;
+                    opacity: 0;
+                    left: 0;
+                    top: 0;
+                }
+            }
+        }
+
+        .icon.disabled {
+            color: $disabled-color;
             pointer-events: none;
+        }
+
+        .connection-ends {
             .icon {
-                pointer-events: all;
+                display: flex;
+                justify-content: center;
+                align-items: center;
             }
         }
-        &.expanded {
+
+        .submenu {
+            pointer-events: all;
+            padding: 0.5em;
+            border: 1px solid #cccccc;
+            border-radius: 2px;
             background: white;
-            border-left: 1px solid #cccccc;
-        }
-        > .selection {
-            margin-bottom: 1em;
-            font-size: 0.8em;
-        }
-        > .icon {
-            cursor: pointer;
-        }
-        .scroll-container {
-            overflow-y: auto;
-            table {
-                tr {
-                    vertical-align: top;
-                    .timestamp {
-                        min-width: 5em;
-                    }
-                    .action {
-                        min-width: 8em;
-                    }
+            display: flex;
+            position: absolute;
+            align-items: flex-start;
+            left: 0;
+            margin: 0;
+
+            > *:not(:first-child) {
+                margin-left: 1em;
+            }
+
+            .colors {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .shapes {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            &.alignment.y {
+                left: 1.5em;
+            }
+
+            &.alignment.x {
+                .icon-group {
+                    grid-auto-flow: column;
                 }
             }
         }
     }
+
     svg.connections {
         .connection {
             stroke: $connection-color;
             stroke-width: max(0.1em, 1.5px);
             stroke-linecap: round;
             fill: transparent;
+
+            &.selected {
+                stroke: $link-color;
+            }
         }
     }
 
     .connection-node {
-        @extend .dropshadow-shallow;
         display: block;
         width: max(0.4em, 6px);
         height: max(0.4em, 6px);
         cursor: pointer;
         position: absolute;
 
-        &.from-node {
-            background: white;
-            border-radius: 50%;
-            border: 1px solid #cccccc;
-            $corner-offset: -7px;
-            width: max(0.4em, 6px);
-            height: max(0.4em, 6px);
-
-            .board:not(.connect) & {
-                &.highlight,
-                &:hover {
-                    width: max(0.4em, 10px);
-                    height: max(0.4em, 10px);
-                    border: 2px solid $link-color;
-                }
-            }
-        }
-
-        &.control-node {
+        &.black-dot-style {
             background: $connection-color;
             border-radius: 50%;
             $corner-offset: -7px;
             width: max(0.3em, 6px);
             height: max(0.3em, 6px);
             &.highlight {
-                width: max(0.4em, 10px);
-                height: max(0.4em, 10px);
-                border: 2px solid $link-color;
-            }
-
-            .board:not(.connect) & {
-                &.highlight,
-                &:hover {
-                    background: white;
-                    border: 2px solid $link-color;
-                }
+                background: $link-color;
             }
         }
 
-        &.to-node {
+        &.arrow-style {
             box-shadow: none;
             background: transparent;
 
@@ -712,13 +573,10 @@
             border-left: max(0.6em, 8px) solid $connection-color;
             border-bottom: max(0.2em, 3px) solid transparent;
 
-            .board:not(.connect) & {
-                &.highlight,
-                &:hover {
-                    border-top: max(0.3em, 4.5px) solid transparent;
-                    border-left: max(0.8em, 12px) solid $link-color;
-                    border-bottom: max(0.3em, 4.5px) solid transparent;
-                }
+            &.highlight {
+                border-top: max(0.3em, 4.5px) solid transparent;
+                border-left: max(0.9em, 12px) solid $link-color;
+                border-bottom: max(0.3em, 4.5px) solid transparent;
             }
         }
     }

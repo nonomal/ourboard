@@ -1,7 +1,19 @@
 import * as H from "harmaja"
 import { componentScope, h, ListView } from "harmaja"
 import * as L from "lonna"
-import { Board, canWrite, findItem, Id, Image, Item, newNote, Note, Video } from "../../../common/src/domain"
+import {
+    Board,
+    canWrite,
+    findConnection,
+    findItem,
+    getConnection,
+    Id,
+    Image,
+    Item,
+    newNote,
+    Note,
+    Video,
+} from "../../../common/src/domain"
 import { isFirefox } from "../components/browser"
 import { ModalContainer } from "../components/ModalContainer"
 import { onClickOutside } from "../components/onClickOutside"
@@ -12,13 +24,20 @@ import { CursorsStore } from "../store/cursors-store"
 import { UserSessionState } from "../store/user-session-store"
 import { boardCoordinateHelper } from "./board-coordinates"
 import { boardDragHandler } from "./board-drag"
-import { BoardFocus, getSelectedIds, getSelectedItem, getSelectedItems } from "./board-focus"
+import {
+    BoardFocus,
+    getSelectedItemIds,
+    getSelectedItem,
+    getSelectedItems,
+    noFocus,
+    getSelectedConnectionIds,
+} from "./board-focus"
 import { boardScrollAndZoomHandler } from "./board-scroll-and-zoom"
-import { BoardToolLayer } from "./BoardToolLayer"
+import { BoardToolLayer } from "./toolbars/BoardToolLayer"
 import { ConnectionsView } from "./ConnectionsView"
-import { ContextMenuView } from "./ContextMenuView"
+import { ContextMenuView } from "./contextmenu/ContextMenuView"
 import { CursorsView } from "./CursorsView"
-import * as G from "./geometry"
+import * as G from "../../../common/src/geometry"
 import { imageUploadHandler, imageDropHandler } from "./image-upload"
 import { ImageView } from "./ImageView"
 import { itemCreateHandler } from "./item-create"
@@ -30,13 +49,17 @@ import { itemSelectAllHandler } from "./item-select-all"
 import { withCurrentContainer } from "./item-setcontainer"
 import { itemUndoHandler } from "./item-undo-redo"
 import { ItemView } from "./ItemView"
-import { installKeyboardShortcut } from "./keyboard-shortcuts"
+import { installKeyboardShortcut, plainKey } from "./keyboard-shortcuts"
 import { RectangularDragSelection } from "./RectangularDragSelection"
 import { SelectionBorder } from "./SelectionBorder"
 import { synchronizeFocusWithServer } from "./synchronize-focus-with-server"
 import { ToolController } from "./tool-selection"
-import { BoardViewHeader } from "./toolbars/BoardViewHeader"
+import { BoardViewHeader } from "./header/BoardViewHeader"
 import { VideoView } from "./VideoView"
+import { startConnecting } from "./item-connect"
+import { emptySet } from "../../../common/src/sets"
+import { installZoomKeyboardShortcuts } from "./zoom-shortcuts"
+import { itemHideContentsHandler } from "./item-hide-contents"
 
 const emptyNote = newNote("")
 
@@ -61,7 +84,6 @@ export const BoardView = ({
         L.filter((b: Board) => !!b, componentScope()),
     )
     const accessLevel = L.view(boardState, "accessLevel")
-    const history = L.view(boardState, "serverHistory")
     const locks = L.view(boardState, (s) => s.locks)
     const sessionId = L.view(sessionState, (s) => s.sessionId)
     const sessions = L.view(boardState, (s) => s.users)
@@ -75,14 +97,19 @@ export const BoardView = ({
         const note = id ? findItem(b)(id) : null
         return (note as Note) || emptyNote
     })
+    const latestConnectionId = L.atom<Id | null>(null)
+    const latestConnection = L.view(latestConnectionId, board, (id, b) => {
+        return id ? findConnection(b)(id) : null
+    })
     const focus = synchronizeFocusWithServer(board, locks, sessionId, dispatch)
     const coordinateHelper = boardCoordinateHelper(containerElement, scrollElement, boardElement, zoom)
     const toolController = ToolController()
+    const tool = toolController.tool
 
     let previousFocus: BoardFocus | null = null
     focus.forEach((f) => {
-        const previousIDs = previousFocus && getSelectedIds(previousFocus)
-        const itemIds = [...getSelectedIds(f)].filter((id) => !previousIDs || !previousIDs.has(id))
+        const previousIDs = previousFocus && getSelectedItemIds(previousFocus)
+        const itemIds = [...getSelectedItemIds(f)].filter((id) => !previousIDs || !previousIDs.has(id))
         previousFocus = f
         if (itemIds.length > 0) {
             dispatch({ action: "item.front", boardId: board.get().id, itemIds })
@@ -90,6 +117,16 @@ export const BoardView = ({
             if (item && item.type === "note") {
                 latestNoteId.set(item.id)
             }
+        }
+        const connectionId = [...getSelectedConnectionIds(f)][0]
+        if (connectionId && getConnection(board.get())(connectionId)?.action === "connect") {
+            latestConnectionId.set(connectionId)
+        }
+    })
+
+    tool.pipe(L.changes).forEach((tool) => {
+        if (tool !== "note" && tool !== "container" && tool !== "text" && focus.get().status === "adding") {
+            focus.set(noFocus)
         }
     })
 
@@ -100,42 +137,17 @@ export const BoardView = ({
     function onURL(assetId: string, url: string) {
         itemsList.get().forEach((i) => {
             if ((i.type === "image" || i.type === "video") && i.assetId === assetId && i.src != url) {
-                dispatch({ action: "item.update", boardId, items: [{ ...i, src: url }] })
+                dispatch({ action: "item.update", boardId, items: [{ id: i.id, src: url }] })
             }
         })
     }
     const uploadImageFile = imageUploadHandler(assets, coordinateHelper, onAdd, onURL)
 
-    doOnUnmount.push(cutCopyPasteHandler(board, focus, coordinateHelper, dispatch, uploadImageFile))
-
-    imageDropHandler(boardElement, assets, focus, uploadImageFile)
-    itemCreateHandler(board, focus, latestNote, boardElement, onAdd)
-    itemDeleteHandler(boardId, dispatch, focus)
-    itemDuplicateHandler(board, dispatch, focus)
-    itemMoveWithArrowKeysHandler(board, dispatch, focus)
-    itemUndoHandler(dispatch)
-    itemSelectAllHandler(board, focus)
-    installKeyboardShortcut(
-        (e) => e.keyCode === 27,
-        () => {
-            toolController.useDefaultTool()
-            focus.set({ status: "none" })
-        },
+    doOnUnmount.push(
+        cutCopyPasteHandler(board, boardStore.crdtStore, focus, coordinateHelper, dispatch, uploadImageFile),
     )
-    L.fromEvent<JSX.KeyboardEvent>(window, "click")
-        .pipe(L.applyScope(componentScope()))
-        .forEach((event) => {
-            if (!boardElement.get()!.contains(event.target as Node)) {
-                // Click outside => reset selection
-                focus.set({ status: "none" })
-            }
-        })
 
-    onClickOutside(boardElement, () => {
-        focus.set({ status: "none" })
-    })
-
-    const { viewRect } = boardScrollAndZoomHandler(
+    const zoomControls = boardScrollAndZoomHandler(
         board,
         boardElement,
         scrollElement,
@@ -143,8 +155,47 @@ export const BoardView = ({
         coordinateHelper,
         toolController,
     )
+    const { viewRect } = zoomControls
 
-    function onClick(e: JSX.MouseEvent) {
+    boardStore.eventsFromServer.forEach((e) => {
+        if (e.action === "user.bringAllToMe") {
+            console.log(`Following user ${e.nickname}`, e)
+            viewRect.set(e.viewRect)
+        }
+    })
+
+    imageDropHandler(boardElement, assets, focus, uploadImageFile)
+    itemCreateHandler(board, focus, latestNote, boardElement, onAdd)
+    itemDeleteHandler(boardId, dispatch, focus)
+    itemDuplicateHandler(board, boardStore.crdtStore, dispatch, focus)
+    itemHideContentsHandler(board, focus, dispatch)
+    itemMoveWithArrowKeysHandler(board, dispatch, focus)
+    itemUndoHandler(dispatch)
+    itemSelectAllHandler(board, focus)
+    installZoomKeyboardShortcuts(zoomControls)
+    installKeyboardShortcut(
+        (e) => e.key === "Escape",
+        () => {
+            toolController.useDefaultTool()
+            focus.set(noFocus)
+        },
+    )
+    installKeyboardShortcut(plainKey("c"), () => toolController.tool.set("connect"))
+    installKeyboardShortcut(plainKey("l"), () => toolController.tool.set("line"))
+    L.fromEvent<JSX.KeyboardEvent>(window, "click")
+        .pipe(L.applyScope(componentScope()))
+        .forEach((event) => {
+            if (!boardElement.get()!.contains(event.target as Node)) {
+                // Click outside => reset selection
+                focus.set(noFocus)
+            }
+        })
+
+    onClickOutside(boardElement, () => {
+        focus.set(noFocus)
+    })
+
+    function onClick(e: JSX.UIEvent) {
         const f = focus.get()
         if (f.status === "connection-adding") {
             toolController.useDefaultTool()
@@ -152,7 +203,19 @@ export const BoardView = ({
             onAdd(f.item)
         } else {
             if (e.target === boardElement.get()) {
-                focus.set({ status: "none" })
+                if (tool.get() === "connect") {
+                    startConnecting(
+                        board,
+                        coordinateHelper,
+                        latestConnection,
+                        dispatch,
+                        toolController,
+                        focus,
+                        coordinateHelper.currentBoardCoordinates.get(),
+                    )
+                } else {
+                    focus.set(noFocus)
+                }
             }
         }
     }
@@ -166,9 +229,9 @@ export const BoardView = ({
         dispatch({ action: "item.add", boardId, items: [item], connections: [] })
 
         if (item.type === "note" || item.type === "text") {
-            focus.set({ status: "editing", id: item.id })
+            focus.set({ status: "editing", itemId: item.id })
         } else {
-            focus.set({ status: "selected", ids: new Set([item.id]) })
+            focus.set({ status: "selected", itemIds: new Set([item.id]), connectionIds: emptySet() })
         }
     }
 
@@ -176,15 +239,14 @@ export const BoardView = ({
         dispatch({ action: "cursor.move", position, boardId })
     })
 
-    const tool = toolController.tool
-
     const { selectionRect } = boardDragHandler({
         ...{
             board,
             boardElem: boardElement,
             coordinateHelper,
+            latestConnection,
             focus,
-            tool,
+            toolController,
             dispatch,
         },
     })
@@ -212,21 +274,33 @@ export const BoardView = ({
         (status) => `board-container ${isEmbedded() ? "embedded" : ""} ${status}`,
     )
 
-    const items = L.view(L.view(board, "items"), Object.values)
+    const items = L.view(L.view(board, "items"), Object.values, (items) => items.filter((i) => !i.hidden))
     const selectedItems = L.view(board, focus, (b, f) => getSelectedItems(b)(f))
     const modalContent = L.atom<any>(null)
 
+    L.interval(100, null, componentScope()).forEach(() => {
+        if (window.scrollY !== 0 || window.scrollX !== 0) {
+            if (focus.get().status !== "editing") {
+                // Reset scroll position when not editing. At least iOS seems to need this. It's vital that our scroll pos stays at origin.
+                window.scrollTo(0, 0)
+            }
+        }
+    })
     return (
         <div id="root" className={className}>
             <ModalContainer content={modalContent} />
             <BoardViewHeader
                 {...{
                     board,
+                    usersOnBoard: L.view(boardState, "users"),
                     sessionState,
                     dispatch,
                     accessLevel,
                     modalContent,
                     eventsFromServer: boardStore.eventsFromServer,
+                    viewRect,
+                    online: L.view(boardStore.state, (s) => s.status === "online"),
+                    crdtStore: boardStore.crdtStore,
                 }}
             />
             <div className="content-container" ref={containerElement.set}>
@@ -237,6 +311,7 @@ export const BoardView = ({
                             draggable={isFirefox ? L.view(focus, (f) => f.status !== "editing") : true}
                             ref={boardElement.set}
                             onClick={onClick}
+                            onTouchEnd={onClick}
                         >
                             <ListView observable={items} renderObservable={renderItem} getKey={(i) => i.id} />
 
@@ -251,9 +326,15 @@ export const BoardView = ({
                             )}
                             <RectangularDragSelection {...{ rect: selectionRect }} />
                             <CursorsView {...{ cursors, sessions, viewRect }} />
-                            {L.view(accessLevel, canWrite, (s) =>
-                                s ? <ContextMenuView {...{ latestNote, dispatch, board, focus, viewRect }} /> : null,
-                            )}
+                            <ContextMenuView
+                                {...{
+                                    latestNote,
+                                    dispatch,
+                                    board,
+                                    focus,
+                                    viewRect,
+                                }}
+                            />
                             <ConnectionsView {...{ board, zoom, dispatch, focus, coordinateHelper }} />
                         </div>
                     </div>
@@ -266,13 +347,12 @@ export const BoardView = ({
                         containerElement,
                         coordinateHelper,
                         dispatch,
-                        zoom,
                         focus,
                         latestNote,
                         onAdd,
                         toolController,
                         sessionState,
-                        viewRect,
+                        ...zoomControls,
                     }}
                 />
             </div>
@@ -304,9 +384,11 @@ export const BoardView = ({
                                 isLocked,
                                 focus,
                                 coordinateHelper,
+                                latestConnection,
                                 dispatch,
                                 toolController,
                                 accessLevel,
+                                boardStore,
                             }}
                         />
                     )
@@ -322,6 +404,7 @@ export const BoardView = ({
                                 focus,
                                 toolController,
                                 coordinateHelper,
+                                latestConnection,
                                 dispatch,
                             }}
                         />
@@ -338,6 +421,7 @@ export const BoardView = ({
                                 focus,
                                 toolController,
                                 coordinateHelper,
+                                latestConnection,
                                 dispatch,
                             }}
                         />

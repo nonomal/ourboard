@@ -1,5 +1,7 @@
+import { describe, expect, it } from "vitest"
+
 import { newNote } from "../../../common/src/domain"
-import { overlaps } from "./geometry"
+import { overlaps } from "../../../common/src/geometry"
 import { organizeItems } from "./item-organizer"
 
 describe("organizeItems", () => {

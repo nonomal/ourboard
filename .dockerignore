@@ -1,0 +1,12 @@
+backend/dist
+backend/localfiles
+Dockerfile
+frontend/.cache
+ignore
+latest.dump*
+node_modules
+npm-debug.log
+**/node_modules
+**/.env
+**/yarn-error.log
+**/.DS_Store

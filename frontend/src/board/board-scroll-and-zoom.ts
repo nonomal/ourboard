@@ -1,18 +1,21 @@
 import * as H from "harmaja"
 import { componentScope } from "harmaja"
-import _ from "lodash"
+import _, { clamp } from "lodash"
 import * as L from "lonna"
-import { BoardCoordinateHelper } from "./board-coordinates"
-import * as G from "./geometry"
 import { Board } from "../../../common/src/domain"
-import { isFirefox } from "../components/browser"
+import * as G from "../../../common/src/geometry"
+import { BoardCoordinateHelper } from "./board-coordinates"
 import { ToolController } from "./tool-selection"
+import { boardContentArea } from "./boardContentArea"
 
 export type BoardZoom = { zoom: number; quickZoom: number }
+export type ZoomAdjustMode = "preserveCursor" | "preserveCenter"
 
 function nonNull<A>(x: A | null | undefined): x is A {
     return !!x
 }
+
+export type ZoomAndScrollControls = ReturnType<typeof boardScrollAndZoomHandler>
 
 export function boardScrollAndZoomHandler(
     board: L.Property<Board>,
@@ -40,20 +43,23 @@ export function boardScrollAndZoomHandler(
         (id) => "scrollAndZoom." + id,
     )
 
-    L.view(scrollElement, localStorageKey, (el, key) => ({ el, key }))
+    const boardIsNonEmpty = board.pipe(L.map((b) => b.name !== ""))
+    L.view(scrollElement, boardElement, localStorageKey, boardIsNonEmpty, (el, be, key, neb) => ({ el, be, key, neb }))
         .pipe(L.applyScope(componentScope()))
-        .forEach(({ el, key }) => {
-            if (el) {
+        .forEach(({ el, be, key, neb }) => {
+            if (el && be && key && neb) {
                 const storedScrollAndZoom = localStorage[key]
-                if (storedScrollAndZoom) {
-                    //console.log("Init position for board", key)
-                    const parsed = JSON.parse(storedScrollAndZoom)
-                    setTimeout(() => {
+                setTimeout(() => {
+                    if (storedScrollAndZoom) {
+                        const parsed = JSON.parse(storedScrollAndZoom)
+                        console.log("Restoring scroll and zoom for board from localStorage", parsed.x, parsed.x)
+                        zoom.set({ zoom: parsed.zoom, quickZoom: 1 })
                         el.scrollTop = parsed.y
                         el.scrollLeft = parsed.x
-                        zoom.set({ zoom: parsed.zoom, quickZoom: 1 })
-                    }, 0) // Need to wait for first render to have correct size. Causes a little flicker.
-                }
+                    } else {
+                        viewRect.set(boardContentArea(board.get(), viewRect.get()))
+                    }
+                }, 0) // Need to wait for first render to have correct size. Causes a little flicker.
             }
         })
 
@@ -69,7 +75,7 @@ export function boardScrollAndZoomHandler(
         L.changes(zoom),
     )
 
-    const viewRect = changes.pipe(
+    const viewRectProp = changes.pipe(
         L.throttle(0, componentScope()), // without the throttle/delay the rects below are not set correctly yet
         L.toStatelessProperty(() => {
             const boardRect = boardElement.get()?.getBoundingClientRect()
@@ -87,14 +93,27 @@ export function boardScrollAndZoomHandler(
         L.cached(componentScope()),
     )
 
+    const viewRect = L.atom(viewRectProp, (newRect) => {
+        const currentRect = viewRectProp.get()
+        const factor = newRect.width / currentRect.width
+        zoom.modify((z) => ({ ...z, quickZoom: z.quickZoom / factor }))
+
+        const newX = coordinateHelper.emToBoardPx(newRect.x) / factor
+        const newY = coordinateHelper.emToBoardPx(newRect.y) / factor
+
+        scrollElement.get()!.scrollLeft = newX
+        scrollElement.get()!.scrollTop = newY
+    })
+
     function wheelZoomHandler(event: WheelEvent) {
         const ctrlOrCmd = event.ctrlKey || event.metaKey
 
         // Wheel-zoom, or two finger zoom gesture on trackpad
         if (ctrlOrCmd && event.deltaY !== 0) {
             event.preventDefault()
-            const step = Math.pow(1.01, -event.deltaY * (isFirefox ? 4 : 1))
-            adjustZoom((z) => z * step)
+            const clampedStep = clamp(event.deltaY, -8, 8)
+            const step = Math.pow(1.01, -clampedStep)
+            adjustZoom({ scaleBy: step }, "preserveCursor")
         } else {
             // If the user seems to be using a trackpad, and they haven't manually selected a tool yet,
             // Let's set the mode to 'select' as a best-effort "works like you'd expect" UX thing
@@ -115,30 +134,61 @@ export function boardScrollAndZoomHandler(
         }
     }
 
+    const MAX_ZOOM = 10
+    const MIN_ZOOM = 0.1
+
     zoom.pipe(L.changes, L.debounce(50, componentScope())).forEach((z) => {
         if (z.quickZoom !== 1 && !scaleStart) {
-            zoom.set({ zoom: z.zoom * z.quickZoom, quickZoom: 1 })
+            const newZoom = clamp(z.zoom * z.quickZoom, MIN_ZOOM, MAX_ZOOM)
+            zoom.set({ zoom: newZoom, quickZoom: 1 })
         }
     })
 
-    function adjustZoom(fn: (previous: number) => number) {
-        const prevBoardCoords = coordinateHelper.currentBoardCoordinates.get()
-        zoom.modify((z) => {
-            return {
-                // TODO: clamp total zoom
-                quickZoom: _.clamp(fn(z.quickZoom), 0.2, 10),
-                zoom: z.zoom,
-            }
-        })
-        coordinateHelper.scrollCursorToBoardCoordinates(prevBoardCoords)
+    function getViewRectCenter() {
+        const vr = viewRect.get()
+        return { x: vr.x + vr.width / 2, y: vr.y + vr.height / 2 }
     }
+
+    type ZoomAdjustment = { scaleBy: number } | { setZoom: number }
+
+    function adjustZoom(change: ZoomAdjustment, mode: ZoomAdjustMode) {
+        if (mode === "preserveCursor") {
+            const prevCursor = coordinateHelper.currentBoardCoordinates.get()
+            justAdjustZoom(change)
+            const diffEm = G.subtract(prevCursor, coordinateHelper.currentBoardCoordinates.get())
+            coordinateHelper.scrollByBoardCoordinates(diffEm)
+        } else {
+            const prevCenterEm = getViewRectCenter()
+            const prevZoom = zoom.get()
+            justAdjustZoom(change)
+            const newZoom = zoom.get()
+            const ratio = (newZoom.zoom * newZoom.quickZoom) / (prevZoom.zoom * prevZoom.quickZoom)
+            const newCenterEm = G.multiply(prevCenterEm, 1 / ratio)
+            const diffEm = G.subtract(prevCenterEm, newCenterEm)
+            coordinateHelper.scrollByBoardCoordinates(diffEm)
+        }
+    }
+
+    function justAdjustZoom(change: ZoomAdjustment) {
+        if ("scaleBy" in change) {
+            zoom.modify((z) => {
+                return {
+                    quickZoom: _.clamp(z.quickZoom * change.scaleBy, MIN_ZOOM / z.zoom, MAX_ZOOM / z.zoom),
+                    zoom: z.zoom,
+                }
+            })
+        } else {
+            zoom.set({ quickZoom: 1, zoom: change.setZoom })
+        }
+    }
+
     let scaleStart: number | null = null
 
     function onGestureStart(e: any) {
         e.preventDefault()
         const scale = typeof e.scale === "number" && (e.scale as number)
         if (scale) {
-            scaleStart = zoom.get().quickZoom / scale
+            scaleStart = (zoom.get().quickZoom * zoom.get().zoom) / scale
         }
     }
 
@@ -146,14 +196,25 @@ export function boardScrollAndZoomHandler(
         e.preventDefault()
         const scale = typeof e.scale === "number" && (e.scale as number)
         if (scale && scaleStart) {
-            const result = scale * scaleStart
-            adjustZoom(() => result)
+            adjustZoom({ setZoom: scale * scaleStart }, "preserveCursor")
         }
     }
 
     function onGestureEnd(e: any) {
         onGestureChange(e)
         scaleStart = null
+    }
+
+    function increaseZoom(adjustMode: ZoomAdjustMode) {
+        adjustZoom({ scaleBy: 1.2 }, adjustMode)
+    }
+
+    function decreaseZoom(adjustMode: ZoomAdjustMode) {
+        adjustZoom({ scaleBy: 1 / 1.2 }, adjustMode)
+    }
+
+    function resetZoom(adjustMode: ZoomAdjustMode) {
+        adjustZoom({ setZoom: 1 }, adjustMode)
     }
 
     H.onMount(() => {
@@ -171,5 +232,9 @@ export function boardScrollAndZoomHandler(
     })
     return {
         viewRect,
+        adjustZoom,
+        increaseZoom,
+        decreaseZoom,
+        resetZoom,
     }
 }

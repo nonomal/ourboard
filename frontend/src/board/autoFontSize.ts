@@ -3,7 +3,7 @@ import * as L from "lonna"
 import { getItemShape, Item, TextItem } from "../../../common/src/domain"
 import { toPlainText } from "../components/sanitizeHTML"
 import { BoardCoordinateHelper } from "./board-coordinates"
-import { Dimensions } from "./geometry"
+import { Dimensions } from "../../../common/src/geometry"
 
 export type AutoFontSizeOptions = {
     maxFontSize: number
@@ -35,7 +35,7 @@ export function autoFontSize(
     text: L.Property<string>,
     focused: L.Property<boolean>,
     coordinateHelper: BoardCoordinateHelper,
-    element: L.Atom<HTMLElement | null>,
+    element: L.Property<HTMLElement | null>,
     options: Partial<AutoFontSizeOptions> = {},
 ): L.Property<string> {
     let fullOptions = { ...defaultOptions, ...options }

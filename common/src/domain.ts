@@ -1,15 +1,24 @@
-import _ from "lodash"
-import * as uuid from "uuid"
 import * as t from "io-ts"
-import { arrayToObject } from "./migration"
-import { LIGHT_BLUE, PINK, RED, YELLOW } from "./colors"
+import * as uuid from "uuid"
+import { LocalStorageBoard } from "../../frontend/src/store/board-local-store"
+import { arrayToRecordById } from "./arrays"
+import { DEFAULT_NOTE_COLOR, LIGHT_BLUE, PINK, RED } from "./colors"
+import { Rect } from "./geometry"
 
 export type Id = string
 export type ISOTimeStamp = string
 
+export function newISOTimeStamp(): ISOTimeStamp {
+    return new Date().toISOString()
+}
+
 export function optional<T extends t.Type<any>>(c: T) {
     return t.union([c, t.undefined, t.null])
 }
+
+export const CrdtDisabled = undefined
+export const CrdtEnabled = 1 as const
+export type CrdtMode = typeof CrdtDisabled | typeof CrdtEnabled
 
 export type BoardAttributes = {
     id: Id
@@ -17,6 +26,7 @@ export type BoardAttributes = {
     width: number
     height: number
     accessPolicy?: BoardAccessPolicy
+    crdt?: CrdtMode
 }
 
 export type BoardContents = {
@@ -29,7 +39,7 @@ export type Board = BoardAttributes &
         serial: Serial
     }
 
-export type BoardStub = Pick<Board, "id" | "name" | "accessPolicy"> & { templateId?: Id }
+export type BoardStub = Pick<Board, "id" | "name" | "accessPolicy" | "crdt"> & { templateId?: Id }
 
 export const AccessLevelCodec = t.union([
     t.literal("admin"),
@@ -58,10 +68,6 @@ export type BoardAccessPolicyDefined = t.TypeOf<typeof BoardAccessPolicyDefinedC
 export const BoardAccessPolicyCodec = t.union([t.undefined, BoardAccessPolicyDefinedCodec])
 export type BoardAccessPolicy = t.TypeOf<typeof BoardAccessPolicyCodec>
 
-export type AuthorizedParty = AuthorizedByEmailAddress | AuthorizedByDomain
-export type AuthorizedByEmailAddress = { email: string }
-export type AuthorizedByDomain = { domain: string }
-
 export type EventUserInfo = UnidentifiedUserInfo | SystemUserInfo | EventUserInfoAuthenticated
 
 export type UnidentifiedUserInfo = { nickname: string; userType: "unidentified" }
@@ -84,6 +90,7 @@ export type SessionUserInfoAuthenticated = {
     email: string
     picture: string | undefined
     userId: string
+    domain: string | null
 }
 
 export type UserSessionInfo = SessionUserInfo & {
@@ -115,7 +122,8 @@ export type BoardCursorPositions = Record<Id, UserCursorPosition>
 export type Color = string
 
 export type ItemBounds = { x: number; y: number; width: number; height: number; z: number }
-export type ItemProperties = { id: string; containerId?: string } & ItemBounds
+export type LockState = false | "locked" | "read-only"
+export type ItemProperties = { id: string; containerId?: string; locked: LockState; hidden?: boolean } & ItemBounds
 
 export const ITEM_TYPES = {
     NOTE: "note",
@@ -125,29 +133,66 @@ export const ITEM_TYPES = {
     CONTAINER: "container",
 } as const
 export type ItemType = typeof ITEM_TYPES[keyof typeof ITEM_TYPES]
-export type TextItemProperties = ItemProperties & { text: string; fontSize?: number }
+export type QuillDelta = any // TODO: define this properly
+export type TextItemProperties = ItemProperties & {
+    text: string
+    fontSize?: number
+    align?: Align
+    crdt?: CrdtMode
+    textAsDelta?: QuillDelta
+}
 export type NoteShape = "round" | "square" | "rect" | "diamond"
 export type Note = TextItemProperties & {
     type: typeof ITEM_TYPES.NOTE
     color: Color
     shape: NoteShape | undefined
 }
-export type Text = TextItemProperties & { type: typeof ITEM_TYPES.TEXT }
+export type Text = TextItemProperties & { type: typeof ITEM_TYPES.TEXT; color: Color }
 export type Image = ItemProperties & { type: typeof ITEM_TYPES.IMAGE; assetId: string; src?: string }
 export type Video = ItemProperties & { type: typeof ITEM_TYPES.VIDEO; assetId: string; src?: string }
-export type Container = TextItemProperties & { type: typeof ITEM_TYPES.CONTAINER; color: Color }
+export type Container = TextItemProperties & {
+    type: typeof ITEM_TYPES.CONTAINER
+    color: Color
+    contentsHidden?: boolean
+}
 
 export type Point = { x: number; y: number }
+export function Point(x: number, y: number) {
+    return { x, y }
+}
 export const isPoint = (u: unknown): u is Point => typeof u === "object" && !!u && "x" in u && "y" in u
+export type ConnectionEndStyle = "none" | "arrow" | "black-dot"
 export type Connection = {
     id: Id
     from: ConnectionEndPoint
     controlPoints: Point[]
     to: ConnectionEndPoint
+    containerId?: string
+    locked: LockState
+    fromStyle: ConnectionEndStyle
+    toStyle: ConnectionEndStyle
+    pointStyle: "none" | "black-dot"
+    action: "connect" | "line"
+    hidden?: boolean
 }
-export type ConnectionEndPoint = Id | Point
-
-export type AttachmentLocation = { side: "left" | "right" | "top" | "bottom" | "none"; point: Point }
+export type ConnectionEndPoint = Point | ConnectionEndPointToItem
+export type ConnectionEndPointToItem = Id | ConectionEndPointDirectedToItem
+export type ConectionEndPointDirectedToItem = { id: Id; side: AttachmentSide }
+export function getEndPointItemId(e: ConnectionEndPointToItem) {
+    if (typeof e === "string") return e
+    return e.id
+}
+export function isItemEndPoint(e: ConnectionEndPoint): e is ConnectionEndPointToItem {
+    if (typeof e === "string") return true
+    if ("side" in e) return true
+    return false
+}
+export function isDirectedItemEndPoint(e: ConnectionEndPoint): e is ConectionEndPointDirectedToItem {
+    return isItemEndPoint(e) && typeof e === "object"
+}
+export type AttachmentSide = "left" | "right" | "top" | "bottom"
+export type AttachmentLocation = { side: "none"; point: Point } | ItemAttachmentLocation
+export type ItemAttachmentLocation = { side: AttachmentSide; point: Point; item: Item }
 
 export type RenderableConnection = Omit<Connection, "from" | "to"> & {
     from: AttachmentLocation
@@ -165,8 +210,14 @@ export type RecentBoard = RecentBoardAttributes & { opened: ISOTimeStamp; userEm
 
 export type BoardEvent = { boardId: Id }
 export type UIEvent = BoardItemEvent | ClientToServerRequest | LocalUIEvent
-export type LocalUIEvent = Undo | Redo | BoardJoinRequest | BoardLoggedOut | GoOffline
-export type EventFromServer = BoardHistoryEntry | BoardStateSyncEvent | LoginResponse | AckAddBoard
+export type LocalUIEvent = Undo | Redo | SetLocalBoard | GoOnline | BoardLoggedOut | GoOffline | TextFormat
+export type EventFromServer = BoardHistoryEntry | BoardStateSyncEvent | LoginResponse | AckAddBoard | ServerConfig
+export type ServerConfig = {
+    action: "server.config"
+    authSupported: boolean
+    assetStorageURL: string
+    crdt: "true" | "false" | "opt-in" | "opt-in-authenticated"
+}
 export type Serial = number
 export type AppEvent =
     | BoardItemEvent
@@ -175,6 +226,7 @@ export type AppEvent =
     | ClientToServerRequest
     | LoginResponse
     | AckAddBoard
+    | ServerConfig
 export type EventWrapper = {
     events: AppEvent[]
     ackId?: string
@@ -202,13 +254,15 @@ export type BoardStateSyncEvent =
     | GotBoardLocks
     | CursorPositions
     | JoinedBoard
-    | AuthLogin
+    | LeftBoard
+    | UserLoggedIn
     | AckJoinBoard
     | DeniedJoinBoard
     | UserInfoUpdate
     | ActionApplyFailed
     | AssetPutUrlResponse
     | Ack
+    | BringAllToMe
 
 export type ClientToServerRequest =
     | CursorMove
@@ -220,36 +274,45 @@ export type ClientToServerRequest =
     | DissociateBoard
     | SetNickname
     | AssetPutUrlRequest
-    | AuthLogin
+    | AuthJWTLogin
+    | UserLoggedIn
     | AuthLogout
     | Ping
+    | BringAllToMe
 
 export type LoginResponse =
     | { action: "auth.login.response"; success: false }
     | { action: "auth.login.response"; success: true; userId: string }
-export type AddConnection = { action: "connection.add"; boardId: Id; connection: Connection }
-export type ModifyConnection = { action: "connection.modify"; boardId: Id; connection: Connection }
-export type DeleteConnection = { action: "connection.delete"; boardId: Id; connectionId: Id }
-export type AuthLogin = {
-    action: "auth.login"
+export type AddConnection = { action: "connection.add"; boardId: Id; connections: Connection[] }
+export type ModifyConnection = { action: "connection.modify"; boardId: Id; connections: Connection[] }
+export type DeleteConnection = { action: "connection.delete"; boardId: Id; connectionIds: Id[] }
+export type UserLoggedIn = {
+    action: "user.login"
     name: string
     email: string
     picture: string | undefined
-    token: string
+}
+export type AuthJWTLogin = {
+    action: "auth.login.jwt"
+    jwt: string
 }
 export type AuthLogout = { action: "auth.logout" }
 export type Ping = { action: "ping" }
-export type AddItem = { action: "item.add"; boardId: Id; items: Item[]; connections?: Connection[] }
-export type UpdateItem = { action: "item.update"; boardId: Id; items: Item[] }
+export type AddItem = { action: "item.add"; boardId: Id; items: Item[]; connections: Connection[] }
+export type UpdateItem = { action: "item.update"; boardId: Id; items: ItemUpdate[]; connections?: ConnectionUpdate[] }
+export type Update<T> = Partial<T> & { id: Id }
+export type ItemUpdate<I extends Item = Item> = Update<I>
+export type ConnectionUpdate = Update<Connection>
 export type MoveItem = {
     action: "item.move"
     boardId: Id
     items: { id: Id; x: number; y: number; containerId?: Id | undefined }[]
+    connections: { id: Id; x: number; y: number }[] // Coordinates are for connection start point.
 }
 export type IncreaseItemFont = { action: "item.font.increase"; boardId: Id; itemIds: Id[] }
 export type DecreaseItemFont = { action: "item.font.decrease"; boardId: Id; itemIds: Id[] }
 export type BringItemToFront = { action: "item.front"; boardId: Id; itemIds: Id[] }
-export type DeleteItem = { action: "item.delete"; boardId: Id; itemIds: Id[] }
+export type DeleteItem = { action: "item.delete"; boardId: Id; itemIds: Id[]; connectionIds: Id[] }
 export type BootstrapBoard = { action: "item.bootstrap"; boardId: Id } & BoardContents
 export type LockItem = { action: "item.lock"; boardId: Id; itemId: Id }
 export type UnlockItem = { action: "item.unlock"; boardId: Id; itemId: Id }
@@ -257,6 +320,7 @@ export type GotBoardLocks = { action: "board.locks"; boardId: Id; locks: ItemLoc
 export type AddBoard = { action: "board.add"; payload: Board | BoardStub }
 export type AckAddBoard = { action: "board.add.ack"; boardId: Id }
 export type JoinBoard = { action: "board.join"; boardId: Id; initAtSerial?: Serial }
+export type BringAllToMe = { action: "user.bringAllToMe"; boardId: Id; sessionId: Id; viewRect: Rect; nickname: string }
 export type AssociateBoard = { action: "board.associate"; boardId: Id; lastOpened: ISOTimeStamp }
 export type DissociateBoard = { action: "board.dissociate"; boardId: Id }
 export type SetBoardAccessPolicy = {
@@ -281,6 +345,7 @@ export type RecentBoardsFromServer = { action: "user.boards"; email: string; boa
 export type Ack = { action: "ack"; ackId: string; serials: Record<Id, Serial> }
 export type ActionApplyFailed = { action: "board.action.apply.failed" }
 export type JoinedBoard = { action: "board.joined"; boardId: Id } & UserSessionInfo
+export type LeftBoard = { action: "board.left"; boardId: Id; sessionId: Id }
 export type UserInfoUpdate = { action: "userinfo.set" } & UserSessionInfo
 export type InitBoardNew = { action: "board.init"; board: Board; accessLevel: AccessLevel }
 export type InitBoardDiff = {
@@ -299,9 +364,16 @@ export type AssetPutUrlRequest = { action: "asset.put.request"; assetId: string 
 export type AssetPutUrlResponse = { action: "asset.put.response"; assetId: string; signedUrl: string }
 export type Undo = { action: "ui.undo" }
 export type Redo = { action: "ui.redo" }
-export type BoardJoinRequest = { action: "ui.board.join.request"; boardId: Id | undefined }
+export type TextFormat = { action: "ui.text.format"; itemIds: Id[]; format: "bold" | "italic" | "underline" }
+
+export type SetLocalBoard = {
+    action: "ui.board.setLocal"
+    boardId: Id | undefined
+    storedInitialState: LocalStorageBoard | undefined
+}
 export type BoardLoggedOut = { action: "ui.board.logged.out"; boardId: Id }
 export type GoOffline = { action: "ui.offline" }
+export type GoOnline = { action: "ui.online" }
 
 export const CURSOR_POSITIONS_ACTION_TYPE = "c" as const
 export type CursorPositions = { action: typeof CURSOR_POSITIONS_ACTION_TYPE; p: Record<Id, UserCursorPosition> }
@@ -309,7 +381,7 @@ export type CursorPositions = { action: typeof CURSOR_POSITIONS_ACTION_TYPE; p: 
 export const exampleBoard: Board = {
     id: "default",
     name: "Test Board",
-    items: arrayToObject("id", [
+    items: arrayToRecordById([
         newNote("Hello", PINK, 10, 5),
         newNote("World", LIGHT_BLUE, 20, 10),
         newNote("Welcome", RED, 5, 14),
@@ -319,13 +391,13 @@ export const exampleBoard: Board = {
     serial: 0,
 }
 
-export function newBoard(name: string, accessPolicy?: BoardAccessPolicy): Board {
-    return { id: uuid.v4(), name, items: {}, accessPolicy, connections: [], ...defaultBoardSize, serial: 0 }
+export function newBoard(name: string, crdt?: CrdtMode, accessPolicy?: BoardAccessPolicy): Board {
+    return { id: uuid.v4(), name, items: {}, accessPolicy, connections: [], ...defaultBoardSize, serial: 0, crdt }
 }
 
 export function newNote(
     text: string,
-    color: Color = YELLOW,
+    color: Color = DEFAULT_NOTE_COLOR,
     x: number = 20,
     y: number = 20,
     width: number = 5,
@@ -333,7 +405,7 @@ export function newNote(
     shape: NoteShape = "square",
     z: number = 0,
 ): Note {
-    return { id: uuid.v4(), type: "note", text, color, x, y, width, height, z, shape }
+    return { id: uuid.v4(), type: "note", text, color, x, y, width, height, z, shape, locked: false }
 }
 
 export function newSimilarNote(note: Note) {
@@ -341,6 +413,7 @@ export function newSimilarNote(note: Note) {
 }
 
 export function newText(
+    crdt: CrdtMode,
     text: string = "HELLO",
     x: number = 20,
     y: number = 20,
@@ -348,17 +421,42 @@ export function newText(
     height: number = 2,
     z: number = 0,
 ): Text {
-    return { id: uuid.v4(), type: "text", text, x, y, width, height, z }
+    return {
+        id: uuid.v4(),
+        type: "text",
+        text,
+        x,
+        y,
+        width,
+        height,
+        z,
+        color: "none",
+        locked: false,
+        crdt,
+    }
 }
 
 export function newContainer(
+    crdt: CrdtMode,
     x: number = 20,
     y: number = 20,
     width: number = 30,
     height: number = 20,
     z: number = 0,
 ): Container {
-    return { id: uuid.v4(), type: "container", text: "Unnamed area", x, y, width, height, z, color: "white" }
+    return {
+        id: uuid.v4(),
+        type: "container",
+        text: "Unnamed area",
+        x,
+        y,
+        width,
+        height,
+        z,
+        color: "white",
+        locked: false,
+        crdt,
+    }
 }
 
 export function newImage(
@@ -369,7 +467,7 @@ export function newImage(
     height: number = 5,
     z: number = 0,
 ): Image {
-    return { id: uuid.v4(), type: "image", assetId, x, y, width, height, z }
+    return { id: uuid.v4(), type: "image", assetId, x, y, width, height, z, locked: false }
 }
 
 export function newVideo(
@@ -380,11 +478,7 @@ export function newVideo(
     height: number = 5,
     z: number = 0,
 ): Video {
-    return { id: uuid.v4(), type: "video", assetId, x, y, width, height, z }
-}
-
-export function getCurrentTime(): ISOTimeStamp {
-    return new Date().toISOString()
+    return { id: uuid.v4(), type: "video", assetId, x, y, width, height, z, locked: false }
 }
 
 export const isBoardItemEvent = (a: AppEvent): a is BoardItemEvent =>
@@ -405,7 +499,7 @@ export function isSameUser(a: EventUserInfo, b: EventUserInfo) {
 }
 
 export function isColoredItem(i: Item): i is ColoredItem {
-    return i.type === "note" || i.type === "container"
+    return i.type === "note" || i.type === "container" || i.type === "text"
 }
 
 export function isShapedItem(i: Item): i is ShapedItem {
@@ -424,7 +518,11 @@ export function isContainer(i: Item): i is Container {
     return i.type === "container"
 }
 
-export function isItem(i: Point): i is Item {
+export function isText(i: Item): i is Text {
+    return i.type === "text"
+}
+
+export function isItem(i: Item | Point | Connection): i is Item {
     return "type" in i
 }
 
@@ -465,6 +563,7 @@ export function getItemIds(e: BoardHistoryEntry | PersistableBoardItemEvent): Id
         case "item.move":
             return e.items.map((i) => i.id)
         case "item.update":
+            return e.items.map((i) => i.id)
         case "item.add":
             return e.items.map((i) => i.id)
         case "item.bootstrap":
@@ -484,10 +583,21 @@ export const getItem = (boardOrItems: Board | Record<string, Item>) => (id: Id) 
     return item
 }
 
-export const findItem = (boardOrItems: Board | Record<string, Item>) => (id: Id) => {
+export const getConnection = (b: Board) => (id: Id) => {
+    const conn = b.connections.find((c) => c.id === id)
+    if (!conn) throw Error("Connection not found: " + id)
+    return conn
+}
+
+export const findItem = (boardOrItems: Board | Record<string, Item>) => (id: Id): Item | null => {
     const items = getItems(boardOrItems)
     const item = items[id]
     return item || null
+}
+
+export const findConnection = (board: Board) => (id: Id) => {
+    const conn = board.connections.find((c) => c.id === id)
+    return conn || null
 }
 
 export function findItemIdsRecursively(ids: Id[], board: Board): Set<Id> {
@@ -544,7 +654,7 @@ export function getBoardAttributes(board: Board, userInfo?: EventUserInfo): Boar
 
 export const BOARD_ITEM_BORDER_MARGIN = 0.5
 
-export function checkBoardAccess(accessPolicy: BoardAccessPolicy | undefined, userInfo: EventUserInfo): AccessLevel {
+export function checkBoardAccess(accessPolicy: BoardAccessPolicy | undefined, userInfo: SessionUserInfo): AccessLevel {
     if (!accessPolicy) return "read-write"
     let accessLevel: AccessLevel = accessPolicy.publicWrite
         ? "read-write"
@@ -555,12 +665,14 @@ export function checkBoardAccess(accessPolicy: BoardAccessPolicy | undefined, us
         return accessLevel
     }
     const email = userInfo.email
+    const domain = userInfo.domain
+
     const defaultAccess = "read-write"
     for (let entry of accessPolicy.allowList) {
         const nextLevel =
             "email" in entry && entry.email === email
                 ? entry.access || defaultAccess
-                : "domain" in entry && email.endsWith(entry.domain)
+                : "domain" in entry && domain === entry.domain
                 ? entry.access || defaultAccess
                 : "none"
         accessLevel = combineAccessLevels(accessLevel, nextLevel)
@@ -581,4 +693,64 @@ export function canRead(a: AccessLevel) {
 
 export function canWrite(a: AccessLevel) {
     return a === "read-write" || a === "admin"
+}
+
+export type Align = "TL" | "TC" | "TR" | "ML" | "MC" | "MR" | "BL" | "BC" | "BR"
+
+export function getAlign(item: TextItem) {
+    return item.align ?? (isNote(item) ? "MC" : "TL")
+}
+
+export type HorizontalAlign = "left" | "center" | "right"
+
+export function getHorizontalAlign(align: Align): HorizontalAlign {
+    switch (align) {
+        case "TL":
+        case "ML":
+        case "BL":
+            return "left"
+        case "TC":
+        case "MC":
+        case "BC":
+            return "center"
+        case "TR":
+        case "MR":
+        case "BR":
+            return "right"
+    }
+    console.log("Unknown align", align)
+    return "center"
+}
+
+export type VerticalAlign = "top" | "middle" | "bottom"
+
+export function getVerticalAlign(align: Align): VerticalAlign {
+    switch (align) {
+        case "TL":
+        case "TC":
+        case "TR":
+            return "top"
+        case "ML":
+        case "MC":
+        case "MR":
+            return "middle"
+        case "BL":
+        case "BC":
+        case "BR":
+            return "bottom"
+    }
+    console.log("Unknown align", align)
+    return "middle"
+}
+
+export function setHorizontalAlign<I extends TextItem>(item: I, a: HorizontalAlign): ItemUpdate<I> {
+    const letter = a === "left" ? "L" : a === "center" ? "C" : "R"
+    const align = `${getAlign(item)[0]}${letter}`
+    return { id: item.id, align } as ItemUpdate<I>
+}
+
+export function setVerticalAlign<I extends TextItem>(item: I, a: VerticalAlign): ItemUpdate<I> {
+    const letter = a === "top" ? "T" : a === "middle" ? "M" : "B"
+    const align = `${letter}${getAlign(item)[1]}`
+    return { id: item.id, align } as ItemUpdate<I>
 }

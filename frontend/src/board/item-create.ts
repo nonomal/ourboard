@@ -1,4 +1,3 @@
-import { componentScope } from "harmaja"
 import * as L from "lonna"
 import { Board, Item, newContainer, newSimilarNote, newText, Note } from "../../../common/src/domain"
 import { BoardFocus, getSelectedItem } from "./board-focus"
@@ -13,14 +12,14 @@ export function itemCreateHandler(
     onAdd: (item: Item) => void,
 ) {
     installKeyboardShortcut(plainKey("n"), () => onAdd(newSimilarNote(latestNote.get())))
-    installKeyboardShortcut(plainKey("a"), () => onAdd(newContainer()))
-    installKeyboardShortcut(plainKey("t"), () => onAdd(newText()))
+    installKeyboardShortcut(plainKey("a"), () => onAdd(newContainer(board.get().crdt)))
+    installKeyboardShortcut(plainKey("t"), () => onAdd(newText(board.get().crdt)))
 
     installDoubleClickHandler((e) => {
         shouldCreateOnDblClick(e) && onAdd(newSimilarNote(latestNote.get()))
     })
 
-    function shouldCreateOnDblClick(event: JSX.MouseEvent) {
+    function shouldCreateOnDblClick(event: JSX.UIEvent) {
         if (event.target === boardElement.get()! || boardElement.get()!.contains(event.target as Node)) {
             const f = focus.get()
             const selectedElement = getSelectedItem(board.get())(focus.get())

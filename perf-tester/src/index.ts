@@ -1,10 +1,23 @@
-import { sleep } from "../../common/src/sleep"
-import { isNote, newNote, Point } from "../../common/src/domain"
-import { GenericServerConnection } from "../../frontend/src/store/server-connection"
-import WebSocket from "ws"
+import dotenv from "dotenv"
+dotenv.config({ path: "../backend/.env" })
+
 import _ from "lodash"
 import * as L from "lonna"
+import WebSocket from "ws"
 import { NOTE_COLORS } from "../../common/src/colors"
+import {
+    CrdtEnabled,
+    Point,
+    UIEvent,
+    defaultBoardSize,
+    isNote,
+    isPersistableBoardItemEvent,
+    isText,
+    newNote,
+    newText,
+} from "../../common/src/domain"
+import { CRDTStore } from "../../frontend/src/store/crdt-store"
+import { GenericServerConnection } from "../../frontend/src/store/server-connection"
 
 // hack, sue me
 // @ts-ignore
@@ -16,12 +29,46 @@ function add(a: Point, b: Point) {
 
 function createTester(nickname: string, boardId: string) {
     let counter = 0
-    const center = { x: 10 + Math.random() * 60, y: 10 + Math.random() * 40 }
+    const { width, height } = defaultBoardSize
+    const center = { x: width / 2 - 30 + Math.random() * 60, y: height / 2 - 20 + Math.random() * 40 }
     const radius = 10 + Math.random() * 10
     const increment = Math.random() * 4 - 2
-    const WS_ADDRESS = `${DOMAIN ? "wss" : "ws"}://${DOMAIN ?? "localhost:1337"}/socket/board/${boardId}`
+    const WS_ROOT = `${DOMAIN ? "wss" : "ws"}://${DOMAIN ?? "localhost:1337"}`
+    const WS_ADDRESS = `${WS_ROOT}/socket/board/${boardId}`
 
-    let connection = GenericServerConnection(WS_ADDRESS, L.constant(false), (s) => new WebSocket(s) as any)
+    let connection = GenericServerConnection(L.constant(WS_ADDRESS), L.constant(false), (s) => new WebSocket(s) as any)
+    let sessionId = ""
+    connection.bufferedServerEvents.forEach((event) => {
+        if (event.action === "board.join.ack") {
+            console.log("Got session id", sessionId)
+            sessionId = event.sessionId
+        }
+    })
+    const localEvents = L.bus<UIEvent>()
+    localEvents.forEach(connection.send)
+
+    class MyWebSocket extends WebSocket {
+        constructor(url: string | URL, protocols?: string | string[] | undefined) {
+            console.log("Creating websocket", url, protocols)
+            super(url as any, protocols, { headers: { Cookie: `sessionId=${sessionId}` } })
+        }
+    }
+
+    const crdtStore = CRDTStore(
+        L.constant(boardId),
+        connection.connected,
+        localEvents.pipe(L.filter(isPersistableBoardItemEvent)).applyScope(L.globalScope),
+        L.constant({
+            status: "anonymous",
+            sessionId: null,
+            nickname: nickname,
+            nicknameSetByUser: true,
+            loginSupported: false,
+        }),
+        () => WS_ROOT,
+        MyWebSocket as any,
+    )
+    crdtStore.getBoardCrdt(boardId)
 
     connection.connected
         .pipe(
@@ -29,30 +76,45 @@ function createTester(nickname: string, boardId: string) {
             L.filter((c) => c),
         )
         .forEach(() => {
-            connection.send({ action: "board.join", boardId })
+            localEvents.push({ action: "board.join", boardId })
         })
     connection.bufferedServerEvents.forEach((event) => {
         if (event.action === "board.init" && "board" in event) {
             const boardAtInit = event.board
             const notes = Object.values(boardAtInit.items).filter(isNote)
+            const texts = Object.values(boardAtInit.items).filter(isText)
             setInterval(() => {
                 counter += increment
                 const position = add(center, {
                     x: radius * Math.sin(counter / 100),
                     y: radius * Math.cos(counter / 100),
                 })
-                connection.send({ action: "cursor.move", position, boardId })
+                localEvents.push({ action: "cursor.move", position, boardId })
                 if (Math.random() < notesPerInterval) {
                     const note = newNote("NOTE " + counter, "black", position.x, position.y)
                     notes.push(note)
-                    connection.send({
+                    localEvents.push({
                         action: "item.add",
                         boardId,
                         items: [note],
+                        connections: [],
                     })
                 }
-                if (Math.random() < editsPerInterval) {
+                if (Math.random() < textsPerInterval) {
+                    const text = newText(CrdtEnabled, "TEXT " + counter, position.x, position.y, 5, 5)
+                    localEvents.push({
+                        action: "item.add",
+                        boardId,
+                        items: [text],
+                        connections: [],
+                    })
+                }
+                // TODO: add crdt edits
+                if (Math.random() < editsPerInterval && notes.length > 0) {
                     const target = _.sample(notes)!
+                    if (!target) {
+                        throw Error("Target item not found")
+                    }
                     const updated = { ...target, text: "EDIT " + counter, color: _.sample(NOTE_COLORS)?.color! }
                     connection.send({
                         ackId: "perf",
@@ -73,7 +135,7 @@ function createTester(nickname: string, boardId: string) {
             }, interval)
         }
         if (event.action === "board.join.ack") {
-            connection.send({ action: "nickname.set", nickname })
+            localEvents.push({ action: "nickname.set", nickname })
         }
     })
 }
@@ -88,12 +150,14 @@ const BOARD_IDS = BOARD_ID.split(",")
 const DOMAIN = process.env.DOMAIN
 
 const NOTES_PER_SEC = parseFloat(process.env.NOTES_PER_SEC ?? "0.1")
+const TEXTS_PER_SEC = parseFloat(process.env.TEXTS_PER_SEC ?? "0.0")
 const EDITS_PER_SEC = parseFloat(process.env.EDITS_PER_SEC ?? "0")
 const CURSOR_MOVES_PER_SEC = parseFloat(process.env.CURSOR_MOVES_PER_SEC ?? "10")
 
 // Calculated vars
 const interval = 1000 / CURSOR_MOVES_PER_SEC
 const notesPerInterval = (NOTES_PER_SEC / 1000) * interval
+const textsPerInterval = (TEXTS_PER_SEC / 1000) * interval
 const editsPerInterval = (EDITS_PER_SEC / 1000) * interval
 console.log(
     `Starting ${USER_COUNT} testers, moving cursors ${CURSOR_MOVES_PER_SEC}/sec, creating notes ${NOTES_PER_SEC}`,

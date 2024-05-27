@@ -1,7 +1,7 @@
 import * as L from "lonna"
 import { globalScope } from "lonna"
-import { addOrReplaceEvent } from "../../../common/src/action-folding"
-import { AppEvent, EventFromServer, EventWrapper, UIEvent } from "../../../common/src/domain"
+import { CURSORS_ONLY, addOrReplaceEvent } from "../../../common/src/action-folding"
+import { EventFromServer, EventWrapper, UIEvent } from "../../../common/src/domain"
 import { sleep } from "../../../common/src/sleep"
 
 export type Dispatch = (e: UIEvent) => void
@@ -10,22 +10,29 @@ const SERVER_EVENTS_BUFFERING_MILLIS = 20
 
 export type ServerConnection = ReturnType<typeof GenericServerConnection>
 
-export type ConnectionStatus = "connecting" | "connected" | "sleeping" | "reconnecting"
+export type ConnectionStatus = "connecting" | "connected" | "sleeping" | "reconnecting" | "offline"
 
-export function BrowserSideServerConnection() {
+export function getWebSocketRootUrl() {
+    const WS_PROTOCOL = location.protocol === "http:" ? "ws:" : "wss:"
+    return `${WS_PROTOCOL}//${location.host}`
+}
+
+export function BrowserSideServerConnection(boardId: L.Property<string | undefined>) {
     const documentHidden = L.fromEvent(document, "visibilitychange").pipe(
         L.toStatelessProperty(() => document.hidden || false),
     )
 
-    const protocol = location.protocol === "http:" ? "ws:" : "wss:"
-    const root = `${protocol}//${location.host}`
+    const socketAddress = L.view(boardId, (id) =>
+        id ? `${getWebSocketRootUrl()}/socket/board/${id}` : `${getWebSocketRootUrl()}/socket/lobby`,
+    )
+
     //const root = "wss://www.ourboard.io"
     //const root = "ws://localhost:1339"
-    return GenericServerConnection(`${root}/socket/lobby`, documentHidden, (s) => new WebSocket(s))
+    return GenericServerConnection(socketAddress, documentHidden, (s) => new WebSocket(s))
 }
 
 export function GenericServerConnection(
-    initialSocketAddress: string,
+    initialSocketAddress: L.Property<string>,
     documentHidden: L.Property<boolean>,
     createSocket: (address: string) => WebSocket,
 ) {
@@ -34,17 +41,22 @@ export function GenericServerConnection(
         L.bufferWithTime(SERVER_EVENTS_BUFFERING_MILLIS),
         L.flatMap((events) => {
             return L.fromArray(
-                events.reduce((folded, next) => addOrReplaceEvent(next, folded), [] as EventFromServer[]),
+                events.reduce((folded, next) => addOrReplaceEvent(next, folded, CURSORS_ONLY), [] as EventFromServer[]),
             )
         }, globalScope),
     )
 
     const connectionStatus = L.atom<ConnectionStatus>("connecting")
-    let currentSocketAddress = initialSocketAddress
-    let socket = initSocket()
+    const forceOffline = L.atom<boolean>(false)
+    let currentSocketAddress: string | undefined = undefined
+    let socket: WebSocket | null = null
+    initialSocketAddress.forEach((newAddress) => {
+        currentSocketAddress = newAddress
+        newSocket()
+    })
 
     setInterval(() => {
-        if (documentHidden.get() && connectionStatus.get() === "connected") {
+        if (documentHidden.get() && connectionStatus.get() === "connected" && socket) {
             console.log("Document hidden, closing socket")
             connectionStatus.set("sleeping")
             socket.close()
@@ -54,13 +66,16 @@ export function GenericServerConnection(
     }, 30000)
 
     documentHidden.onChange((hidden) => {
-        if (!hidden && connectionStatus.get() === "sleeping") {
+        if (!hidden && connectionStatus.get() === "sleeping" && !forceOffline.get()) {
             console.log("Document shown, reconnecting.")
             newSocket()
         }
     })
 
     function initSocket() {
+        if (forceOffline.get() || currentSocketAddress === undefined) {
+            return null
+        }
         connectionStatus.set("connecting")
         console.log("Connecting to " + currentSocketAddress)
         const ws = createSocket(currentSocketAddress)
@@ -91,10 +106,13 @@ export function GenericServerConnection(
             }
         })
 
+        forceOffline.pipe(L.changes, L.take(1)).forEach((f) => f && ws.close())
         return ws
 
         async function reconnect() {
-            if (documentHidden.get()) {
+            if (forceOffline.get()) {
+                connectionStatus.set("offline")
+            } else if (documentHidden.get()) {
                 connectionStatus.set("sleeping")
             } else {
                 connectionStatus.set("reconnecting")
@@ -108,13 +126,14 @@ export function GenericServerConnection(
     }
 
     function newSocket() {
-        socket.close()
+        socket?.close()
         socket = initSocket()
     }
 
+    forceOffline.pipe(L.changes).forEach((f) => !f && newSocket())
+
     function send(e: UIEvent | EventWrapper) {
         //console.log("Sending", e)
-        if ("action" in e) sentUIEvents.push(e)
         let wrapper: EventWrapper
         if ("action" in e) {
             sentUIEvents.push(e)
@@ -123,12 +142,15 @@ export function GenericServerConnection(
             wrapper = e
         }
         try {
-            socket.send(JSON.stringify(wrapper))
+            socket?.send(JSON.stringify(wrapper))
         } catch (e) {
             console.error("Failed to send", e) // TODO
         }
     }
     const sentUIEvents = L.bus<UIEvent>()
+    if (typeof window !== "undefined") {
+        ;(window as any).forceOffline = forceOffline
+    }
 
     return {
         send,

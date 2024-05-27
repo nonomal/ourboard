@@ -62,21 +62,20 @@ async function build() {
     if (fs.existsSync(DIST_FOLDER)) rimraf.sync(DIST_FOLDER)
     const randomString = Math.random().toString(36).slice(2)
     const outfile = path.resolve(CWD, `dist/bundle.${randomString}.js`)
+    const metafile = path.resolve(CWD, `dist/bundle.${randomString}.meta.json`)
     const now = Date.now()
     await esbuild.build({
         entryPoints: [path.resolve(CWD, "src", "index.tsx")],
         bundle: true,
         minify: mode !== "watch",
         outfile,
+        metafile,
         sourcemap: true,
         platform: "browser",
         plugins: [sassPlugin, stubImportsPlugin(["path"])],
         loader: { ".png": "file", ".svg": "file" },
         define: {
             "process.env.NODE_ENV": envFallback(process.env.NODE_ENV, `"development"`),
-            "process.env.AWS_ASSETS_BUCKET_URL": envFallback(process.env.AWS_ASSETS_BUCKET_URL, null),
-            "process.env.GOOGLE_API_KEY": envFallback(process.env.GOOGLE_API_KEY, null),
-            "process.env.GOOGLE_CLIENT_ID": envFallback(process.env.GOOGLE_CLIENT_ID, null),
         },
     })
 

@@ -1,0 +1,83 @@
+name: build
+on: [push]
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        services:
+            postgres:
+                image: postgres:12
+                env:
+                    POSTGRES_USER: r-board
+                    POSTGRES_PASSWORD: secret
+                ports:
+                    - 13338:5432
+                # Set health checks to wait until postgres has started
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+        strategy:
+            matrix:
+                node-version: [18.x]
+        steps:
+            - uses: actions/checkout@v2
+            - name: Use Node.js ${{ matrix.node-version }}
+              uses: actions/setup-node@v1
+              with:
+                  node-version: ${{ matrix.node-version }}
+            - name: Install deps
+              run: yarn
+            - name: Run unit tests
+              run: yarn test:unit
+            - name: Wait for DB
+              run: yarn wait-for-db
+            - name: Run integration tests
+              run: yarn test:integration
+            - name: Build
+              run: yarn build
+            - name: Start server
+              run: yarn start&
+              env:
+                  SESSION_SIGNING_SECRET: notsosecretthing
+            - name: Prepare Playwright
+              run: npx playwright install chromium firefox
+            - name: Run playwright tests
+              run: yarn test:playwright
+            - name: Archive results
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: test-results
+                  path: |
+                      playwright/results
+    lint:
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                node-version: [18.x]
+        steps:
+            - uses: actions/checkout@v2
+            - name: Use Node.js ${{ matrix.node-version }}
+              uses: actions/setup-node@v1
+              with:
+                  node-version: ${{ matrix.node-version }}
+            - name: Install dependencies
+              run: yarn install --frozen-lockfile
+            - name: Check code formatting & generated files
+              run: yarn lint
+    docker-image:
+        needs: test
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/master'
+        steps:
+            - uses: actions/checkout@v2
+            - name: docker login
+              env:
+                  DOCKER_HUB_USER: ${{secrets.DOCKER_HUB_USER}}
+                  DOCKER_HUB_PASSWORD: ${{secrets.DOCKER_HUB_PASSWORD}}
+              run: docker login -u $DOCKER_HUB_USER -p $DOCKER_HUB_PASSWORD
+            - name: docker build
+              run: docker build . -t raimohanska/ourboard:latest -t raimohanska/ourboard:${{github.sha}}
+            - name: docker push
+              run: docker push raimohanska/ourboard:latest && docker push raimohanska/ourboard:${{github.sha}}

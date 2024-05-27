@@ -20,9 +20,9 @@ export const WsWrapper = (ws: WebSocket) => {
         ws.addEventListener("close", f)
     }
     return {
-        send: (msg: EventFromServer, cache?: StringifyCache) => {
+        send: (buffer: Buffer) => {
             try {
-                ws.send(cache ? cache.stringify(msg) : JSON.stringify(msg))
+                ws.send(buffer, { binary: false })
             } catch (e) {
                 ws.close()
             }
@@ -36,21 +36,13 @@ export const WsWrapper = (ws: WebSocket) => {
 }
 export type WsWrapper = ReturnType<typeof WsWrapper>
 
-export function StringifyCache() {
-    const cache = new Map<any, string>()
-    const stringify = (msg: any) => {
-        let cached = cache.get(msg)
-        if (!cached) {
-            //console.log("Stringify")
-            cached = JSON.stringify(msg)
-            cache.set(msg, cached)
-        } else {
-            //console.log("Using cached")
-        }
-        return cached
+type CachedBuffer = { msg: EventFromServer; buffer: Buffer }
+let cachedBuffer: CachedBuffer | null = null
+export function toBuffer(msg: EventFromServer) {
+    // We cache the latest buffer to avoid creating a new buffer for every message.
+    if (cachedBuffer && cachedBuffer.msg === msg) {
+        return cachedBuffer.buffer
     }
-    return {
-        stringify,
-    }
+    cachedBuffer = { msg, buffer: Buffer.from(JSON.stringify(msg)) }
+    return cachedBuffer.buffer
 }
-export type StringifyCache = ReturnType<typeof StringifyCache>

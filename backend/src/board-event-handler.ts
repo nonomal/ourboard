@@ -6,21 +6,17 @@ import {
     Id,
     isBoardItemEvent,
     isPersistableBoardItemEvent,
+    newISOTimeStamp,
 } from "../../common/src/domain"
 import { getBoard, maybeGetBoard, updateBoards } from "./board-state"
-import { updateBoard } from "./board-store"
-import { MessageHandlerResult } from "./connection-handler"
+import { getBoardInfo, renameBoardConvenienceColumnOnly, updateBoardAccessPolicy } from "./board-store"
 import { handleCommonEvent } from "./common-event-handler"
+import { MessageHandlerResult } from "./connection-handler"
+import { WS_HOST_DEFAULT, WS_HOST_LOCAL, WS_PROTOCOL } from "./host-config"
 import { obtainLock } from "./locker"
-import { addSessionToBoard, broadcastBoardEvent, getSession } from "./sessions"
 import { associateUserWithBoard } from "./user-store"
-import { getBoardInfo } from "./board-store"
-import { WsWrapper } from "./ws-wrapper"
-import { sleep } from "../../common/src/sleep"
-
-const WS_PROTOCOL = process.env.WS_PROTOCOL ?? "ws"
-const WS_HOST_LOCAL = (process.env.WS_HOST_LOCAL ?? "localhost:1337").split(",")
-const WS_HOST_DEFAULT = process.env.WS_HOST_DEFAULT ?? "localhost:1337"
+import { addSessionToBoard, broadcastBoardEvent, getSession } from "./websocket-sessions"
+import { toBuffer, WsWrapper } from "./ws-wrapper"
 
 export const handleBoardEvent = (allowedBoardId: Id | null, getSignedPutUrl: (key: string) => string) => async (
     socket: WsWrapper,
@@ -51,9 +47,10 @@ export const handleBoardEvent = (allowedBoardId: Id | null, getSignedPutUrl: (ke
             // Path - board id mismatch -> always redirect
 
             const wsAddress = `${WS_PROTOCOL}://${wsHost}/socket/board/${appEvent.boardId}`
-            console.info(
-                `Trying to join board ${appEvent.boardId} on socket for board ${allowedBoardId}, board host ${wsHost} local hostnames ${WS_HOST_LOCAL}`,
-            )
+            /* console.info(
+                    `Trying to join board ${appEvent.boardId} on socket for board ${allowedBoardId}, board host ${wsHost} local hostnames ${WS_HOST_LOCAL}`,
+            )*/
+
             session.sendEvent({
                 action: "board.join.denied",
                 boardId: appEvent.boardId,
@@ -117,7 +114,7 @@ export const handleBoardEvent = (allowedBoardId: Id | null, getSignedPutUrl: (ke
                 let historyEntry: BoardHistoryEntry = {
                     ...appEvent,
                     user: session.userInfo,
-                    timestamp: new Date().toISOString(),
+                    timestamp: newISOTimeStamp(),
                 }
                 try {
                     const serial = updateBoards(state, historyEntry)
@@ -125,19 +122,14 @@ export const handleBoardEvent = (allowedBoardId: Id | null, getSignedPutUrl: (ke
                     broadcastBoardEvent(historyEntry, session)
                     if (appEvent.action === "board.rename") {
                         // special case: keeping name up to date as it's in a separate column
-                        await updateBoard({ boardId: appEvent.boardId, name: appEvent.name })
+                        await renameBoardConvenienceColumnOnly(appEvent.boardId, appEvent.name)
                     }
                     if (appEvent.action === "board.setAccessPolicy") {
                         if (session.boardSession.accessLevel !== "admin") {
                             console.warn("Trying to change access policy without admin access")
                             return true
                         }
-
-                        await updateBoard({
-                            boardId: appEvent.boardId,
-                            name: state.board.name,
-                            accessPolicy: appEvent.accessPolicy,
-                        })
+                        await updateBoardAccessPolicy(appEvent.boardId, appEvent.accessPolicy)
                     }
                     return { boardId, serial }
                 } catch (e) {
@@ -164,10 +156,22 @@ export const handleBoardEvent = (allowedBoardId: Id | null, getSignedPutUrl: (ke
                 }
                 return true
             }
+            case "user.bringAllToMe": {
+                const session = getSession(socket)
+                const state = maybeGetBoard(appEvent.boardId)
+                if (session && state && session.isOnBoard(appEvent.boardId)) {
+                    if (session.sessionId !== appEvent.sessionId) {
+                        console.warn("Incorrect sessionId in user.bringAllToMe")
+                    } else {
+                        broadcastBoardEvent(appEvent, session)
+                    }
+                }
+                return true
+            }
             case "asset.put.request": {
                 const { assetId } = appEvent
                 const signedUrl = getSignedPutUrl(assetId)
-                socket.send({ action: "asset.put.response", assetId, signedUrl })
+                socket.send(toBuffer({ action: "asset.put.response", assetId, signedUrl }))
                 return true
             }
         }

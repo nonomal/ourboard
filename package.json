@@ -9,21 +9,19 @@
     "uuid": "^8.3.0"
   },
   "devDependencies": {
-    "@types/jest": "^26.0.15",
+    "@playwright/test": "^1.41.1",
     "@types/uuid": "^8.3.0",
-    "cypress": "6.8.0",
     "husky": "4",
-    "jest": "^26.6.3",
     "lint-staged": "^10.5.4",
     "npm-run-all": "^4.1.5",
-    "playwright": "^1.11.1",
     "prettier": "^2.2.1",
-    "ts-jest": "^26.4.3",
-    "typescript": "^4.0.2"
+    "tsx": "3.13.0",
+    "typescript": "^5.3",
+    "vitest": "^1.3.1"
   },
   "private": true,
   "engines": {
-    "node": "^15"
+    "node": ">=18 <21"
   },
   "workspaces": [
     "frontend",
@@ -32,32 +30,32 @@
   ],
   "scripts": {
     "dev": "npm-run-all --parallel dev:db watch:frontend dev:backend typecheck:dev:frontend",
+    "dev-with-keycloak": "npm-run-all --parallel dev:keycloak dev",
     "dev:no-db": "npm-run-all --parallel watch:frontend dev:backend",
-    "dev:db": "docker-compose up||true",
+    "dev:db": "docker-compose up db||true",
+    "dev:keycloak": "docker-compose up keycloak||true",
     "watch:frontend": "yarn --cwd frontend watch",
     "dev:backend": "yarn --cwd backend dev",
     "start": "yarn start:backend",
     "start:backend": "yarn --cwd backend start",
+    "benchmark": "tsx benchmark/benchmark.ts",
     "build": "yarn build:frontend && yarn build:backend && yarn build:perf-tester",
     "build:frontend": "yarn --cwd frontend build",
     "build:backend": "yarn --cwd backend build",
     "build:perf-tester": "yarn --cwd perf-tester build",
-    "test:unit": "jest",
-    "test:integration": "TEST_TARGET=integration jest",
-    "test:integration:watch": "TEST_TARGET=integration jest --watchAll",
-    "test:watch": "jest --watchAll",
-    "test:playwright": "TEST_TARGET=playwright jest --testTimeout=15000",
-    "test:playwright:debug": "TEST_TARGET=playwright PWDEBUG=1 jest --testTimeout=900000",
-    "test-e2e:dev": "cypress run --headed || true",
-    "cypress": "cypress open",
+    "test:unit": "vitest --run",
+    "test:unit:watch": "vitest",
+    "test:integration": "TEST_TARGET=integration vitest --run",
+    "test:integration:watch": "TEST_TARGET=integration vitest",
+    "test:playwright": "yarn playwright test",
+    "test:playwright:debug": "PWDEBUG=1 yarn playwright test",
     "prettier:check": "prettier --check .",
-    "check-sources": "yarn prettier:check && yarn --cwd backend check-sources",
+    "lint": "yarn prettier:check && yarn --cwd backend lint",
     "typecheck:dev:frontend": "cd frontend && tsc --noEmit --preserveWatchOutput --watch",
     "perf-test:prod": "node perf-tester/dist/perf-tester/src/index.js",
     "format": "prettier --write .",
     "apidocs": "cd backend && yarn apidocs",
-    "compact-history": "cd backend && ts-node src/tools/history-compactor.ts",
-    "wait-for-db": "cd backend && ts-node src/tools/wait-for-db.ts",
+    "wait-for-db": "cd backend && tsx src/tools/wait-for-db.ts",
     "psql": "psql postgres://r-board:secret@localhost:13338/r-board"
   }
 }

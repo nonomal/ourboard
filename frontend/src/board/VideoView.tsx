@@ -1,7 +1,7 @@
 import { h } from "harmaja"
 import * as L from "lonna"
 import { BoardCoordinateHelper } from "./board-coordinates"
-import { Board, Image, Video } from "../../../common/src/domain"
+import { Board, Connection, Image, Video } from "../../../common/src/domain"
 import { BoardFocus } from "./board-focus"
 import { AssetStore } from "../store/asset-store"
 import { itemDragToMove } from "./item-dragmove"
@@ -20,6 +20,7 @@ export const VideoView = ({
     focus,
     toolController,
     coordinateHelper,
+    latestConnection,
     dispatch,
 }: {
     board: L.Property<Board>
@@ -29,16 +30,18 @@ export const VideoView = ({
     focus: L.Atom<BoardFocus>
     toolController: ToolController
     coordinateHelper: BoardCoordinateHelper
+    latestConnection: L.Property<Connection | null>
     dispatch: Dispatch
     assets: AssetStore
 }) => {
-    const { selected, onClick } = itemSelectionHandler(
+    const { selected, onClick, onTouchStart } = itemSelectionHandler(
         id,
         "video",
         focus,
         toolController,
         board,
         coordinateHelper,
+        latestConnection,
         dispatch,
     )
     const tool = toolController.tool
@@ -46,7 +49,19 @@ export const VideoView = ({
         <span
             className="video"
             onClick={onClick}
-            ref={itemDragToMove(id, board, focus, toolController, coordinateHelper, dispatch, false) as any}
+            onTouchStart={onTouchStart}
+            ref={
+                itemDragToMove(
+                    id,
+                    board,
+                    focus,
+                    toolController,
+                    coordinateHelper,
+                    latestConnection,
+                    dispatch,
+                    false,
+                ) as any
+            }
             style={L.view(
                 video,
                 (p: Video) =>
@@ -66,7 +81,7 @@ export const VideoView = ({
                 <p>Your user agent does not support the HTML5 Video element.</p>
             </video>
             {L.view(isLocked, (l) => l && <span className="lock">🔒</span>)}
-            <DragBorder {...{ id, board, toolController, coordinateHelper, focus, dispatch }} />
+            <DragBorder {...{ id, board, toolController, coordinateHelper, latestConnection, focus, dispatch }} />
         </span>
     )
 }

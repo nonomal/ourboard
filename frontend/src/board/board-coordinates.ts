@@ -1,8 +1,9 @@
 import { componentScope } from "harmaja"
-import * as L from "lonna"
 import * as _ from "lodash"
-import { add, Coordinates, subtract, origin, multiply } from "./geometry"
+import * as L from "lonna"
+import { add, Coordinates, origin, subtract } from "../../../common/src/geometry"
 import { BoardZoom } from "./board-scroll-and-zoom"
+import { onSingleTouch } from "./touchScreen"
 
 const newCoordinates = (x: number, y: number): Coordinates => {
     return { x, y }
@@ -124,14 +125,13 @@ export function boardCoordinateHelper(
                 { leading: true, trailing: true },
             ),
         )
+        container.addEventListener("touchstart", (e) => {
+            onSingleTouch(e, (touch) => currentPageCoordinates.set({ x: touch.pageX, y: touch.pageY }))
+        })
+        container.addEventListener("touchmove", (e) => {
+            onSingleTouch(e, (touch) => currentPageCoordinates.set({ x: touch.pageX, y: touch.pageY }))
+        })
     })
-
-    function scrollCursorToBoardCoordinates(coords: Coordinates) {
-        const diff = subtract(coords, currentBoardCoordinates.get())
-        const diffPixels = { x: emToPagePx(diff.x), y: emToPagePx(diff.y) }
-        scrollElem.get()!.scrollLeft += diffPixels.x
-        scrollElem.get()!.scrollTop += diffPixels.y
-    }
 
     const scrollEvent = scrollElem.pipe(
         L.changes,
@@ -146,6 +146,19 @@ export function boardCoordinateHelper(
         }),
     )
 
+    function scrollByPixels(diffPixels: { x: number; y: number }) {
+        scrollElem.get()!.scrollLeft += diffPixels.x
+        scrollElem.get()!.scrollTop += diffPixels.y
+    }
+
+    function scrollByBoardCoordinates(diffEm: { x: number; y: number }) {
+        const diffPx = {
+            x: emToPagePx(diffEm.x),
+            y: emToPagePx(diffEm.y),
+        }
+        scrollByPixels(diffPx)
+    }
+
     return {
         pageToBoardCoordinates,
         pageCoordDiffToThisPoint,
@@ -157,6 +170,6 @@ export function boardCoordinateHelper(
         emToPagePx,
         emToBoardPx,
         pxToEm,
-        scrollCursorToBoardCoordinates,
+        scrollByBoardCoordinates,
     }
 }

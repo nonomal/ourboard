@@ -1,3 +1,5 @@
+import { describe, expect, it } from "vitest"
+
 import { BoardStore } from "./board-store"
 import * as L from "lonna"
 import {
@@ -10,13 +12,16 @@ import {
     Board,
     BoardHistoryEntry,
     getBoardAttributes,
+    JoinBoard,
 } from "../../../common/src/domain"
 import { UserSessionState } from "./user-session-store"
 import { LocalStorageBoard } from "./board-local-store"
 import { sleep } from "../../../common/src/sleep"
 import { mkBootStrapEvent } from "../../../common/src/migration"
+import * as WebSocket from "ws"
 
 const otherUserEventAttributes = { user: { userType: "unidentified", nickname: "joe" }, timestamp: "0" } as const
+const localUser = { userType: "unidentified", nickname: "" } as const
 
 const board0 = newBoard("testboard")
 const item1 = newNote("hello1")
@@ -24,6 +29,7 @@ const addItem1: BoardHistoryEntry = {
     action: "item.add",
     boardId: board0.id,
     items: [item1],
+    connections: [],
     serial: 1,
     ...otherUserEventAttributes,
 }
@@ -38,7 +44,8 @@ const board2_2 = { ...board2, serial: 2, items: { ...board2.items, [item1.id]: i
 
 describe("Board Store", () => {
     it("Applies event from server", async () => {
-        const [store, serverEvents] = await initBoardStore({ serverSideBoard: board0 })
+        const { store, serverEvents } = await initBoardStore({ serverSideBoard: board0 })
+        expect(store.state.get().board).toEqual(board0)
 
         serverEvents.push(addItem1)
 
@@ -47,10 +54,11 @@ describe("Board Store", () => {
     })
 
     it("Applies local event", async () => {
-        const [store, serverEvents] = await initBoardStore({ serverSideBoard: board0 })
+        const { store, serverEvents } = await initBoardStore({ serverSideBoard: board0 })
+        expect(store.state.get().board).toEqual(board0)
 
         // 1. Event applied locally, serverShadow and serial unchanged
-        store.dispatch({ action: "item.add", boardId: board0.id, items: [item1] })
+        store.dispatch({ action: "item.add", boardId: board0.id, items: [item1], connections: [] })
         expect(store.state.get().board).toEqual({ ...board0, serial: 0, items: { [item1.id]: item1 } })
         expect(store.state.get().serverShadow).toEqual(board0)
 
@@ -61,9 +69,10 @@ describe("Board Store", () => {
     })
 
     it("Rebases local event when remote event arrives before ack", async () => {
-        const [store, serverEvents] = await initBoardStore({ serverSideBoard: board1 })
+        const { store, serverEvents } = await initBoardStore({ serverSideBoard: board1 })
+        expect(store.state.get().board).toEqual(board1)
         // 1. Event applied locally, serverShadow and serial unchanged
-        store.dispatch({ action: "item.add", boardId: board0.id, items: [item2] })
+        store.dispatch({ action: "item.add", boardId: board0.id, items: [item2], connections: [] })
         expect(store.state.get().board).toEqual(board2)
         expect(store.state.get().serverShadow).toEqual(board1)
         expect(store.state.get().queue.length).toEqual(0)
@@ -105,13 +114,12 @@ describe("Board Store", () => {
 
 describe("With stored local state", () => {
     it("Without server-side changes", async () => {
-        const [store, serverEvents] = await initBoardStore({
+        const { store } = await initBoardStore({
             serverSideBoard: board1,
             serverSideHistory: [mkBootStrapEvent(board1.id, board1, board1.serial)],
             locallyStoredBoard: {
                 serverShadow: board1,
                 queue: [],
-                serverHistory: [],
             },
         })
 
@@ -120,7 +128,7 @@ describe("With stored local state", () => {
     })
 
     it("With server-side changes", async () => {
-        const [store, serverEvents] = await initBoardStore({
+        const { store } = await initBoardStore({
             serverSideBoard: { ...board2, serial: 2 },
             serverSideHistory: [
                 mkBootStrapEvent(board1.id, board1, board1.serial),
@@ -128,6 +136,7 @@ describe("With stored local state", () => {
                     action: "item.add",
                     boardId: board0.id,
                     items: [item2],
+                    connections: [],
                     serial: 2,
                     ...otherUserEventAttributes,
                 },
@@ -135,17 +144,120 @@ describe("With stored local state", () => {
             locallyStoredBoard: {
                 serverShadow: board1,
                 queue: [],
-                serverHistory: [],
             },
         })
 
         expect(store.state.get().board).toEqual({ ...board2, serial: 2 })
         expect(store.state.get().serverShadow).toEqual(store.state.get().board)
     })
+
+    it("With queued local changes", async () => {
+        const { store } = await initBoardStore({
+            serverSideBoard: board1,
+            serverSideHistory: [],
+            locallyStoredBoard: {
+                serverShadow: board1,
+                queue: [
+                    { action: "item.update", boardId: board0.id, items: [item1_1], timestamp: "0", user: localUser },
+                ],
+            },
+        })
+
+        expect(store.state.get().board).toEqual({ ...board1, items: { [item1.id]: item1_1 } })
+    })
+
+    it("With queued local changes and server-side changes", async () => {
+        const { store } = await initBoardStore({
+            serverSideBoard: { ...board2, serial: 2 },
+            serverSideHistory: [
+                mkBootStrapEvent(board1.id, board1, board1.serial),
+                {
+                    action: "item.add",
+                    boardId: board0.id,
+                    items: [item2],
+                    connections: [],
+                    serial: 2,
+                    ...otherUserEventAttributes,
+                },
+            ],
+            locallyStoredBoard: {
+                serverShadow: board1,
+                queue: [
+                    { action: "item.update", boardId: board0.id, items: [item1_1], timestamp: "0", user: localUser },
+                ],
+            },
+        })
+
+        // The server-side changes should be applied first, then the queued local changes
+        expect(store.state.get().board).toEqual({
+            ...board2,
+            serial: 2,
+            items: { ...board2.items, [item1.id]: item1_1 },
+        })
+    })
+
+    it("Going offline and back online", async () => {
+        const { store, serverEvents, connected, sentEvents, replyToJoinRequest } = await initBoardStore({
+            serverSideBoard: board0,
+        })
+        expect(store.state.get().board).toEqual(board0)
+        const sentBeforeOffline = sentEvents.slice()
+
+        // Create a local change (add item2)
+        const localAddEvent: UIEvent = { action: "item.add", boardId: board0.id, items: [item2], connections: [] }
+        const expectedSentEvent = {
+            action: "item.add",
+            boardId: board0.id,
+            items: [item2],
+            connections: [],
+            timestamp: expect.any(String),
+            user: { userType: "unidentified", nickname: "<unknown>" },
+        } as const
+        store.dispatch(localAddEvent)
+        expect(store.state.get().sent).toEqual([expectedSentEvent])
+        const expectedAckBundle = {
+            // Events are sent in bundles, which include all events in the "sent" buffer when sending.
+            ackId: "1",
+            events: [expectedSentEvent],
+        }
+        expect(sentEvents).toEqual([...sentBeforeOffline, expectedAckBundle])
+
+        // Go offline. Sent but not acknowledged events are discarded.
+        connected.set(false)
+        expect(store.state.get().status).toEqual("offline")
+        expect(store.state.get().sent).toEqual([])
+        expect(store.state.get().board).toEqual(board0) // Also local state is reset to reflect the discarded event
+
+        // Create local event offline (add item2)
+        store.dispatch(localAddEvent)
+        expect(store.state.get().board).toEqual({ ...board0, serial: 0, items: { [item2.id]: item2 } })
+        expect(store.state.get().serverShadow).toEqual(board0)
+
+        // Go back online
+        connected.set(true)
+        expect(store.state.get().status).toEqual("joining")
+        const expectedRejoinRequest = {
+            action: "board.join",
+            boardId: board0.id,
+            initAtSerial: 0,
+        } as const
+        expect(sentEvents).toEqual([...sentBeforeOffline, expectedAckBundle, expectedRejoinRequest])
+
+        // Meanwhile, item1 was added on the server. Now server responds to the rejoin request
+        replyToJoinRequest(expectedRejoinRequest, board1, [addItem1])
+        expect(store.state.get().board).toEqual(board2) // Client has merged changes from server
+        expect(store.state.get().sent).toEqual([expectedSentEvent])
+        expect(store.state.get().serverShadow).toEqual(board1)
+        expect(sentEvents).toEqual([...sentBeforeOffline, expectedAckBundle, expectedRejoinRequest, expectedAckBundle])
+
+        // Ack from server, update serverShadow and serial
+        serverEvents.push({ action: "ack", ackId: "", serials: { [board0.id]: 2 } })
+        expect(store.state.get().board).toEqual({ ...board2, serial: 2 })
+        expect(store.state.get().serverShadow).toEqual({ ...board2, serial: 2 })
+    })
 })
 
-// TODO: test diff init with local "offline" events
-// TODO: test going offline, resync
+// TODO: test going offline before getting board.init (case server redirects to other URL)
 // TODO: test effects of server event buffering (bufferedServerEvents)
 // TODO: test undo, redo buffers
 
@@ -168,9 +280,11 @@ async function initBoardStore({
     let sentEvents: (UIEvent | EventWrapper)[] = []
     const send = (x: UIEvent | EventWrapper) => sentEvents.push(x)
     const sessionInfo = L.atom<UserSessionState>({
-        status: "logging-in-local",
+        status: "anonymous",
         sessionId: "",
         nickname: "",
+        nicknameSetByUser: false,
+        loginSupported: true,
     })
 
     const connection = {
@@ -190,10 +304,9 @@ async function initBoardStore({
         storeBoardState: async (newState: LocalStorageBoard) => {},
     }
 
-    const store = BoardStore(boardId, connection, sessionInfo, localStore)
+    const store = BoardStore(boardId, connection, sessionInfo, localStore, WebSocket as any)
 
     expect(store.state.get().board).toEqual(undefined)
-    expect(store.state.get().offline).toEqual(true)
     expect(store.state.get().queue).toEqual([])
     expect(store.state.get().sent).toEqual([])
     expect(store.state.get().serverShadow).toEqual(undefined)
@@ -203,37 +316,48 @@ async function initBoardStore({
 
     await waitForBackgroundJobs()
 
-    sessionInfo.set({ status: "anonymous", nickname: "", sessionId: "", loginSupported: false })
+    sessionInfo.set({
+        status: "anonymous",
+        nickname: localUser.nickname,
+        nicknameSetByUser: false,
+        sessionId: "",
+        loginSupported: false,
+    })
 
     await waitForBackgroundJobs()
 
-    const initAtSerial = locallyStoredBoard?.serverShadow?.serial
-    expect(sentEvents).toEqual([
-        {
-            action: "board.join",
-            boardId: board0.id,
-            initAtSerial,
-        },
-    ])
+    const expectedJoinRequest = {
+        action: "board.join",
+        boardId: board0.id,
+        initAtSerial: locallyStoredBoard?.serverShadow?.serial,
+    } as const
+    expect(sentEvents).toEqual([expectedJoinRequest])
 
-    if (initAtSerial) {
-        serverEvents.push({
-            action: "board.init.diff",
-            first: true,
-            last: true,
-            recentEvents: serverSideHistory!.filter((e) => e.serial! > initAtSerial),
-            boardAttributes: getBoardAttributes(serverSideBoard),
-            initAtSerial,
-            accessLevel: "read-write",
-        })
-    } else {
-        serverEvents.push({ action: "board.init", board: serverSideBoard, accessLevel: "read-write" })
+    function replyToJoinRequest(
+        joinRequest: JoinBoard,
+        serverSideBoard: Board,
+        serverSideHistory: BoardHistoryEntry[],
+    ) {
+        const initAtSerial = joinRequest.initAtSerial
+        if (initAtSerial != undefined) {
+            serverEvents.push({
+                action: "board.init.diff",
+                first: true,
+                last: true,
+                recentEvents: serverSideHistory!.filter((e) => e.serial! > initAtSerial),
+                boardAttributes: getBoardAttributes(serverSideBoard),
+                initAtSerial,
+                accessLevel: "read-write",
+            })
+        } else {
+            serverEvents.push({ action: "board.init", board: serverSideBoard, accessLevel: "read-write" })
+        }
     }
+    replyToJoinRequest(expectedJoinRequest, serverSideBoard, serverSideHistory || [])
 
     await waitForBackgroundJobs()
 
-    expect(store.state.get().board).toEqual(serverSideBoard)
     expect(store.state.get().serverShadow).toEqual(serverSideBoard)
 
-    return [store, serverEvents] as const
+    return { store, serverEvents, connected, sentEvents, replyToJoinRequest } as const
 }

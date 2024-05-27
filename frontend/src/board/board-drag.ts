@@ -1,27 +1,39 @@
-import { BoardCoordinateHelper, BoardCoordinates } from "./board-coordinates"
-import { Board, Item, Container } from "../../../common/src/domain"
-import * as L from "lonna"
-import { DND_GHOST_HIDING_IMAGE } from "./item-drag"
-import { BoardFocus, getSelectedIds } from "./board-focus"
-import { Rect, overlaps, rectFromPoints, Coordinates, containedBy } from "./geometry"
-import * as _ from "lodash"
 import { componentScope } from "harmaja"
-import { Tool } from "./tool-selection"
+import * as _ from "lodash"
+import * as L from "lonna"
+import { connectionRect } from "../../../common/src/connection-utils"
+import { Board, Connection, Point } from "../../../common/src/domain"
+import { containedBy, overlaps, Rect, rectFromPoints } from "../../../common/src/geometry"
+import { Dispatch } from "../store/server-connection"
+import { BoardCoordinateHelper, BoardCoordinates } from "./board-coordinates"
+import { BoardFocus, getSelectedConnectionIds, getSelectedItemIds, isAnythingSelected, noFocus } from "./board-focus"
+import { newConnectionCreator } from "./item-connect"
+import { DND_GHOST_HIDING_IMAGE } from "./item-drag"
+import { ToolController } from "./tool-selection"
+import { onSingleTouch } from "./touchScreen"
 
-export type DragAction = { action: "select"; selectedAtStart: Set<string> } | { action: "pan" } | { action: "none" }
+export type DragAction =
+    | { action: "select"; selectedAtStart: BoardFocus }
+    | { action: "pan" }
+    | { action: "none" }
+    | { action: "connect" | "line"; startPos: Point }
 
 export function boardDragHandler({
     boardElem,
     coordinateHelper,
+    latestConnection,
     board,
-    tool,
+    toolController,
     focus,
+    dispatch,
 }: {
     boardElem: L.Property<HTMLElement | null>
     coordinateHelper: BoardCoordinateHelper
+    latestConnection: L.Property<Connection | null>
     board: L.Property<Board>
-    tool: L.Property<Tool>
+    toolController: ToolController
     focus: L.Atom<BoardFocus>
+    dispatch: Dispatch
 }) {
     let start: L.Atom<BoardCoordinates | null> = L.atom(null)
     let current: L.Atom<BoardCoordinates | null> = L.atom(null)
@@ -29,6 +41,9 @@ export function boardDragHandler({
         if (!s || !c) return null
         return rectFromPoints(s, c)
     })
+    const tool = toolController.tool
+
+    const connector = newConnectionCreator(board, focus, latestConnection, dispatch)
 
     const dragAction = L.atom<DragAction>({ action: "none" })
 
@@ -41,16 +56,28 @@ export function boardDragHandler({
             const pos = coordinateHelper.pageToBoardCoordinates({ x: e.pageX, y: e.pageY })
             start.set(pos)
             current.set(pos)
-            if (!shouldDragSelect) {
+            if (t === "connect") {
+                dragAction.set({ action: "connect", startPos: pos })
+            } else if (t === "line") {
+                dragAction.set({ action: "line", startPos: pos })
+            } else if (!shouldDragSelect) {
                 dragAction.set({ action: "pan" })
             } else {
-                let selectedAtStart = e.shiftKey ? getSelectedIds(focus.get()) : new Set<string>()
-                focus.set(selectedAtStart.size > 0 ? { status: "selected", ids: selectedAtStart } : { status: "none" })
+                const f = focus.get()
+                const selectedAtStart = e.shiftKey ? f : noFocus
+                const anySelected = isAnythingSelected(selectedAtStart)
+                focus.set(
+                    anySelected
+                        ? {
+                              status: "selected",
+                              itemIds: getSelectedItemIds(selectedAtStart),
+                              connectionIds: getSelectedConnectionIds(selectedAtStart),
+                          }
+                        : noFocus,
+                )
                 dragAction.set({ action: "select", selectedAtStart })
             }
         })
-
-        const itemsList = L.view(L.view(board, "items"), Object.values)
 
         el.addEventListener(
             "drag",
@@ -62,16 +89,23 @@ export function boardDragHandler({
                     if (da.action === "select") {
                         const bounds = rect.get()!
                         const startPoint = start.get()!
-                        // Do not select container if drag originates from within container
-                        const overlapping = itemsList
-                            .get()
-                            .filter((i) => overlaps(i, bounds) && !containedBy(startPoint, i))
+                        const b = board.get()
 
-                        const toBeSelected = new Set(overlapping.map((i) => i.id).concat([...da.selectedAtStart]))
+                        const itemIds = new Set([
+                            ...Object.values(b.items)
+                                .filter((i) => overlaps(i, bounds) && !containedBy(startPoint, i) && !i.hidden) // Do not select container if drag originates from within container
+                                .map((i) => i.id),
+                            ...getSelectedItemIds(da.selectedAtStart),
+                        ])
 
-                        toBeSelected.size > 0
-                            ? focus.set({ status: "selected", ids: toBeSelected })
-                            : focus.set({ status: "none" })
+                        const connectionIds = new Set([
+                            ...b.connections.filter((c) => overlaps(connectionRect(b)(c), bounds)).map((i) => i.id),
+                            ...getSelectedConnectionIds(da.selectedAtStart),
+                        ])
+
+                        itemIds.size + connectionIds.size > 0
+                            ? focus.set({ status: "selected", itemIds, connectionIds })
+                            : focus.set(noFocus)
                     } else if (da.action === "pan") {
                         const s = start.get()
                         const c = current.get()
@@ -80,6 +114,10 @@ export function boardDragHandler({
                             (el.style.transform = `translate(${coordinateHelper.emToPagePx(
                                 c.x - s.x,
                             )}px, ${coordinateHelper.emToPagePx(c.y - s.y)}px)`)
+                    } else if (da.action === "connect") {
+                        connector.whileDragging(da.startPos, coords, "connect")
+                    } else if (da.action === "line") {
+                        connector.whileDragging(da.startPos, coords, "line")
                     }
                 },
                 15,
@@ -102,6 +140,9 @@ export function boardDragHandler({
                 const xDiff = coordinateHelper.emToPagePx(startX - x)
                 const yDiff = coordinateHelper.emToPagePx(startY - y)
                 s.scrollBy(xDiff, yDiff)
+            } else if (da.action === "connect" || da.action === "line") {
+                toolController.useDefaultTool()
+                connector.endDrag()
             }
             dragAction.set({ action: "none" })
         }
@@ -113,6 +154,30 @@ export function boardDragHandler({
                 current.set(null)
             }
         }
+
+        let touchStart: Touch | null = null
+        function preventDefaultTouch(e: TouchEvent) {
+            if (e.target === boardElem.get()) {
+                e.preventDefault()
+            }
+        }
+        const onTouch = (e: TouchEvent) => {
+            preventDefaultTouch(e)
+            onSingleTouch(e, (touch) => {
+                if (touchStart) {
+                    const xDiff = touchStart.pageX - touch.pageX
+                    const yDiff = touchStart.pageY - touch.pageY
+                    const s = document.querySelector(".scroll-container")!
+                    s.scrollBy(xDiff, yDiff)
+                }
+                touchStart = touch
+            })
+        }
+        el.addEventListener("touchmove", onTouch)
+        el.addEventListener("touchend", (e) => {
+            preventDefaultTouch(e)
+            touchStart = null
+        })
     })
 
     return {

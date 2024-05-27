@@ -4,7 +4,7 @@ import { badRequest, internalServerError, notFound } from "typera-common/respons
 import { applyMiddleware } from "typera-express"
 import { wrapNative } from "typera-express/middleware"
 import { headers } from "typera-express/parser"
-import { YELLOW } from "../../../common/src/colors"
+import { DEFAULT_NOTE_COLOR } from "../../../common/src/colors"
 import {
     AppEvent,
     Board,
@@ -12,12 +12,13 @@ import {
     Color,
     Container,
     EventUserInfo,
+    newISOTimeStamp,
     newNote,
     Note,
     PersistableBoardItemEvent,
 } from "../../../common/src/domain"
 import { getBoard, ServerSideBoardState, updateBoards } from "../board-state"
-import { broadcastBoardEvent } from "../sessions"
+import { broadcastBoardEvent } from "../websocket-sessions"
 
 export const route = applyMiddleware(wrapNative(bodyParser.json()))
 export const apiTokenHeader = headers(t.partial({ API_TOKEN: t.string }))
@@ -72,7 +73,7 @@ export function getItemAttributesForContainer(container: string | undefined, boa
     const containerItem = findContainer(container, board)
     if (containerItem) {
         return {
-            containedId: containerItem.id,
+            containerId: containerItem.id,
             x: containerItem.x + 2,
             y: containerItem.y + 2,
         }
@@ -82,7 +83,7 @@ export function getItemAttributesForContainer(container: string | undefined, boa
 
 export function dispatchSystemAppEvent(board: ServerSideBoardState, appEvent: PersistableBoardItemEvent) {
     const user: EventUserInfo = { userType: "system", nickname: "Github webhook" }
-    let historyEntry: BoardHistoryEntry = { ...appEvent, user, timestamp: new Date().toISOString() }
+    let historyEntry: BoardHistoryEntry = { ...appEvent, user, timestamp: newISOTimeStamp() }
     console.log(JSON.stringify(historyEntry))
     // TODO: refactor, this is the same sequence as done in connection-handler for messages from clients
     const serial = updateBoards(board, historyEntry)
@@ -104,9 +105,10 @@ export function addItem(
     let itemAttributes: object = getItemAttributesForContainer(container, board.board)
     if (itemId) itemAttributes = { ...itemAttributes, id: itemId }
 
-    const item: Note = { ...newNote(text, color || YELLOW), ...itemAttributes }
-    const appEvent: AppEvent = { action: "item.add", boardId: board.board.id, items: [item] }
+    const item: Note = { ...newNote(text, color || DEFAULT_NOTE_COLOR), ...itemAttributes }
+    const appEvent: AppEvent = { action: "item.add", boardId: board.board.id, items: [item], connections: [] }
     dispatchSystemAppEvent(board, appEvent)
+    return item
 }
 
 export class InvalidRequest extends Error {

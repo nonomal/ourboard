@@ -1,33 +1,35 @@
-import { AppEvent, Board, checkBoardAccess, defaultBoardSize } from "../../common/src/domain"
+import * as Y from "yjs"
+import { AppEvent, Board, CrdtEnabled, checkBoardAccess, defaultBoardSize } from "../../common/src/domain"
 import { addBoard } from "./board-state"
 import { fetchBoard } from "./board-store"
+import { yWebSocketServer } from "./board-yjs-server"
 import { MessageHandlerResult } from "./connection-handler"
-import { verifyGoogleTokenAndUserInfo } from "./google-token-verifier"
-import { getSession, logoutUser, setNicknameForSession, setVerifiedUserForSession } from "./sessions"
+import { getAuthenticatedUserFromJWT } from "./http-session"
 import {
     associateUserWithBoard,
     dissociateUserWithBoard,
     getUserAssociatedBoards,
     getUserIdForEmail,
 } from "./user-store"
-import { WsWrapper } from "./ws-wrapper"
+import { getSession, logoutUser, setNicknameForSession, setVerifiedUserForSession } from "./websocket-sessions"
+import { WsWrapper, toBuffer } from "./ws-wrapper"
 
 export async function handleCommonEvent(socket: WsWrapper, appEvent: AppEvent): Promise<MessageHandlerResult> {
     switch (appEvent.action) {
-        case "auth.login": {
-            const success = await verifyGoogleTokenAndUserInfo(appEvent)
-            const userId = await getUserIdForEmail(appEvent.email)
+        case "auth.login.jwt": {
+            const user = getAuthenticatedUserFromJWT(appEvent.jwt)
             const session = getSession(socket)
-            if (session && success) {
-                const userInfo = await setVerifiedUserForSession(appEvent, session)
-                console.log(`${appEvent.name} logged in`)
-                session.sendEvent({ action: "auth.login.response", success, userId })
+            if (session && user !== null) {
+                const userId = await getUserIdForEmail(user.email)
+                const userInfo = await setVerifiedUserForSession(user, session)
+                console.log(`${user.name} logged in`)
+                session.sendEvent({ action: "auth.login.response", success: true, userId })
                 if (session.boardSession) {
                     await associateUserWithBoard(userId, session.boardSession.boardId)
                 }
                 session.sendEvent({
                     action: "user.boards",
-                    email: appEvent.email,
+                    email: user.email,
                     boards: await getUserAssociatedBoards(userInfo),
                 })
             } else if (session) {
@@ -90,12 +92,17 @@ export async function handleCommonEvent(socket: WsWrapper, appEvent: AppEvent): 
                         }
                         template = { ...found.board, accessPolicy: undefined }
                     } else {
-                        console.error(`Template ${payload.templateId}${aliased ? `(${templateId})` : ""} not found`)
+                        console.error(`Template ${payload.templateId}${aliased ? `(${templateId})` : ""} not found`)
                     }
                 }
                 const board = { ...defaultBoardSize, items: {}, connections: [], ...template, ...payload, serial: 0 }
+                if (template && template.crdt === CrdtEnabled) {
+                    const templateDoc = await yWebSocketServer.docs.getYDocAndWaitForFetch(template.id)
+                    const newDoc = await yWebSocketServer.docs.getYDocAndWaitForFetch(board.id)
+                    Y.applyUpdate(newDoc, Y.encodeStateAsUpdate(templateDoc))
+                }
                 await addBoard(board)
-                socket.send({ action: "board.add.ack", boardId: board.id })
+                socket.send(toBuffer({ action: "board.add.ack", boardId: board.id }))
             }
             return true
         }

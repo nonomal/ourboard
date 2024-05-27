@@ -1,25 +1,24 @@
 import * as H from "harmaja"
-import * as L from "lonna"
 import { h } from "harmaja"
-
+import _ from "lodash"
+import * as L from "lonna"
+import { EventFromServer, RecentBoardAttributes, ServerConfig } from "../../common/src/domain"
 import "./app.scss"
-import { UserSessionStore } from "./store/user-session-store"
+import { BoardNavigation } from "./board-navigation"
 import { BoardView } from "./board/BoardView"
+import { IS_TOUCHSCREEN } from "./board/touchScreen"
 import { DashboardView } from "./dashboard/DashboardView"
 import { assetStore } from "./store/asset-store"
+import boardLocalStore from "./store/board-local-store"
+import { BoardState, BoardStore } from "./store/board-store"
+import { CursorsStore } from "./store/cursors-store"
 import { RecentBoards } from "./store/recent-boards"
 import { BrowserSideServerConnection } from "./store/server-connection"
-import { BoardState, BoardStore } from "./store/board-store"
-import _ from "lodash"
-import { BoardNavigation } from "./board-navigation"
-import { RecentBoardAttributes } from "../../common/src/domain"
-import { CursorsStore } from "./store/cursors-store"
-import boardLocalStore from "./store/board-local-store"
-import { ReactiveRouter } from "harmaja-router"
+import { UserSessionStore } from "./store/user-session-store"
 
 const App = () => {
     const { boardId, page } = BoardNavigation()
-    const connection = BrowserSideServerConnection()
+    const connection = BrowserSideServerConnection(boardId)
     const sessionStore = UserSessionStore(connection, localStorage)
     const boardStore = BoardStore(boardId, connection, sessionStore.sessionState, boardLocalStore)
     const cursorsStore = CursorsStore(connection, sessionStore)
@@ -27,18 +26,23 @@ const App = () => {
     const assets = assetStore(connection, L.view(boardStore.state, "board"), boardStore.events)
     const title = L.view(boardStore.state, (s) => (s.board && s.board.name ? `${s.board.name} - OurBoard` : "OurBoard"))
     title.forEach((t) => (document.querySelector("title")!.textContent = t))
+    const serverConfig = connection.bufferedServerEvents
+        .pipe(
+            L.scan<EventFromServer, ServerConfig | null>(null, (c, e) => (e.action === "server.config" ? e : c)),
+        )
+        .applyScope(H.componentScope())
 
     boardStore.state
         .pipe(
             L.changes,
-            L.filter((s: BoardState) => s.status === "ready" && !!s.board),
+            L.filter((s: BoardState) => s.status === "online" && !!s.board),
             L.map((s: BoardState) => ({ id: s.board!.id, name: s.board!.name } as RecentBoardAttributes)),
             L.skipDuplicates(_.isEqual),
         )
         .forEach(recentBoards.storeRecentBoard)
 
     return (
-        <div>
+        <div className={IS_TOUCHSCREEN ? "touch" : "notouch"}>
             {L.view(page, (page) => {
                 switch (page.page) {
                     case "Board":
@@ -68,6 +72,7 @@ const App = () => {
                                     sessionState: sessionStore.sessionState,
                                     recentBoards,
                                     eventsFromServer: connection.bufferedServerEvents,
+                                    serverConfig,
                                 }}
                             />
                         )

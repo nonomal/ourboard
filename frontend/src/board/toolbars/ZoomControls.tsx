@@ -1,15 +1,21 @@
-import { h, Fragment } from "harmaja"
-import * as L from "lonna"
-import { ZoomInIcon, ZoomOutIcon } from "../../components/Icons"
-import { BoardZoom } from "../board-scroll-and-zoom"
+import { h } from "harmaja"
+import { ResetZoomIcon, ZoomInIcon, ZoomOutIcon } from "../../components/Icons"
+import { ZoomAndScrollControls } from "../board-scroll-and-zoom"
 
-export function ZoomControls({ zoom }: { zoom: L.Atom<BoardZoom> }) {
+export function ZoomControls({
+    increaseZoom,
+    decreaseZoom,
+    resetZoom,
+}: Pick<ZoomAndScrollControls, "increaseZoom" | "decreaseZoom" | "resetZoom">) {
     return (
-        <span className="zoom-controls">
-            <span className="icon" title="Zoom in" onClick={() => zoom.modify((z) => ({ ...z, zoom: z.zoom * 1.1 }))}>
+        <span className="zoom-controls" onClick={(e) => e.stopPropagation()}>
+            <span className="icon" title="Zoom in" onClick={() => increaseZoom("preserveCenter")}>
                 <ZoomInIcon />
             </span>
-            <span className="icon" title="Zoom out" onClick={() => zoom.modify((z) => ({ ...z, zoom: z.zoom / 1.1 }))}>
+            <span className="icon" title="Reset zoom" onClick={() => resetZoom("preserveCenter")}>
+                <ResetZoomIcon />
+            </span>
+            <span className="icon" title="Zoom out" onClick={() => decreaseZoom("preserveCenter")}>
                 <ZoomOutIcon />
             </span>
         </span>

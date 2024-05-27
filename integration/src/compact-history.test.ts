@@ -1,12 +1,15 @@
+import { describe, expect, it, beforeAll, afterAll } from "vitest"
 import { addHours, addSeconds } from "date-fns"
 import _ from "lodash"
 import { createBoard, getBoardHistoryBundleMetas, storeEventHistoryBundle } from "../../backend/src/board-store"
 import { quickCompactBoardHistory } from "../../backend/src/compact-history"
 import { closeConnectionPool, initDB, inTransaction, withDBClient } from "../../backend/src/db"
-import { BoardHistoryEntry, EventUserInfo, Id, newBoard, Serial } from "../../common/src/domain"
+import { BoardHistoryEntry, EventUserInfo, Id, newBoard, newISOTimeStamp, Serial } from "../../common/src/domain"
 type BundleDesc = [Date, Serial, Serial]
 describe("quick compact", () => {
-    beforeAll(() => initDB("./backend"))
+    beforeAll(async () => {
+        await initDB("./backend")
+    })
     it("Compacts nearby events into single bundle", async () => {
         const board = newBoard("testboard")
         const boardId = board.id
@@ -111,9 +114,12 @@ async function addItems(boardId: Id, firstSerial: Serial, lastSerial: Serial, sa
         action: "item.add",
         boardId,
         items: [],
-        timestamp: new Date().toISOString(),
+        connections: [],
+        timestamp: newISOTimeStamp(),
         user,
         serial,
     }))
-    await inTransaction((client) => storeEventHistoryBundle(boardId, events, client, savedAt))
+    await inTransaction((client) =>
+        storeEventHistoryBundle(boardId, events, events[events.length - 1].serial!, null, client, savedAt),
+    )
 }

@@ -1,12 +1,11 @@
-import { UIEvent, BoardWithHistory, Id, Board, BoardHistoryEntry } from "../../../common/src/domain"
-import { migrateBoard } from "../../../common/src/migration"
 import * as localForage from "localforage"
-import _ from "lodash"
+import { throttle } from "lodash"
+import { Board, BoardHistoryEntry, Id } from "../../../common/src/domain"
+import { migrateBoard, migrateEvent } from "../../../common/src/migration"
 
 export type LocalStorageBoard = {
-    serverShadow: Board
-    queue: BoardHistoryEntry[] // serverShadow + queue = current board
-    serverHistory: BoardHistoryEntry[] // history until serverShadow (queued events not included)
+    serverShadow: Board // Our view of the board as it is on the server
+    queue: BoardHistoryEntry[] // Local events to send. serverShadow + queue = current board.
 }
 
 const BOARD_STORAGE_KEY_PREFIX = "board_"
@@ -21,7 +20,7 @@ async function getInitialBoardState(boardId: Id) {
     return activeBoardState
 }
 
-async function getStoredState(localStorageKey: string) {
+async function getStoredState(localStorageKey: string): Promise<LocalStorageBoard | undefined> {
     try {
         const stringState = await localForage.getItem<string>(localStorageKey)
         const state = JSON.parse(stringState!) as LocalStorageBoard
@@ -29,7 +28,8 @@ async function getStoredState(localStorageKey: string) {
             return undefined
         }
         return {
-            ...state, // future migration code here
+            serverShadow: migrateBoard(state.serverShadow),
+            queue: state.queue.map(migrateEvent),
         }
     } catch (e) {
         console.error(`Fetching local state ${localStorageKey} from IndexedDB failed`, e)
@@ -48,7 +48,7 @@ async function storeBoardState(newState: LocalStorageBoard): Promise<void> {
     storeThrottled(activeBoardState)
 }
 
-const storeThrottled = _.throttle(
+const storeThrottled = throttle(
     (newState: LocalStorageBoard) => {
         try {
             localForage.setItem(getStorageKey(newState.serverShadow.id), JSON.stringify(newState))
@@ -73,6 +73,7 @@ async function clearStateByKey(localStorageKey: string) {
 }
 
 async function clearAllPrivateBoards(): Promise<void> {
+    console.log("Clearing all private boards from local storage")
     const keys = await localForage.keys()
     await Promise.all(
         keys.map(async (k) => {

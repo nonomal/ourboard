@@ -6,10 +6,12 @@
   "dependencies": {
     "@types/cookie": "^0.4.0",
     "@types/email-validator": "^1.0.6",
+    "@types/js-cookie": "^3.0.6",
     "@types/lodash": "^4.14.161",
     "@types/md5": "^2.2.1",
     "@types/path-to-regexp": "^1.7.0",
     "@types/pretty-ms": "^5.0.1",
+    "@types/quill": "^2.0.14",
     "@types/ramda": "^0.27.40",
     "@types/sanitize-html": "^1.27.1",
     "bezier-js": "^4.0.3",
@@ -21,18 +23,26 @@
     "harmaja": "^0.24",
     "harmaja-router": "^0.3.3",
     "io-ts": "^2.2.15",
+    "js-cookie": "^3.0.5",
     "jsonwebtoken": "^8.5.1",
+    "jwt-decode": "^3.1.2",
     "localforage": "^1.9.0",
     "lodash": "^4.17.20",
-    "lonna": "^0.12.1",
+    "lonna": "^0.12.2",
     "md5": "^2.3.0",
     "path-to-regexp": "^6.2.0",
     "pretty-ms": "^7.0.1",
+    "quill": "^1.3.7",
+    "quill-cursors": "^4.0.2",
     "ramda": "^0.27.1",
     "rimraf": "^3.0.2",
     "sanitize-html": "^2.3.2",
     "sass": "^1.32.8",
-    "uuid": "^8.3.0"
+    "uuid": "^8.3.0",
+    "y-indexeddb": "^9.0.12",
+    "y-quill": "^0.1.5",
+    "y-websocket": "^1.5.3",
+    "yjs": "^13.6.12"
   },
   "scripts": {
     "build": "node esbuild.js build",
@@ -48,7 +58,7 @@
     "dotenv": "^8.2.0",
     "nodemon": "^2.0.4",
     "npm-run-all": "^4.1.5",
-    "typescript": "^4.0.2"
+    "typescript": "^5.3"
   },
   "browserslist": [
     "since 2017-06"
